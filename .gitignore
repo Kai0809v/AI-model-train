@@ -1,4 +1,4 @@
-/pretrained/
+
 /scaler_x
 /scaler_y
 /selected_features_indices.npy
@@ -12,7 +12,6 @@
 /transformer_weights_single_minmax.pth
 /transformer_weights_singlelearn.pth
 /wind_data.csv
-/优化算法.md
 /测试数据后续功率抬升无功率.csv
 /测试数据短切片.csv
 /测试数据后续功率抬升.csv
