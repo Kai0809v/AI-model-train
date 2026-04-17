@@ -33,15 +33,22 @@ def run_feature_optimization_pipeline(input_path, output_dir="processed_data"):
     }
     df.rename(columns=col_mapping, inplace=True)
 
-    print("2. 提取时间周期特征...")
+    print("2. 提取时间周期特征 (并执行 Informer 专属的 [-0.5, 0.5] 归一化)...")
     df['Time'] = pd.to_datetime(df['Time'])
-    df['Month'] = df['Time'].dt.month
-    df['Hour'] = df['Time'].dt.hour
-    df['Day'] = df['Time'].dt.day
-    df['DayOfWeek'] = df['Time'].dt.dayofweek
+
+    # ✅ 严格映射到 [-0.5, 0.5] 区间
+    df['Month'] = (df['Time'].dt.month - 1) / 11.0 - 0.5
+    df['Day'] = (df['Time'].dt.day - 1) / 30.0 - 0.5
+    df['DayOfWeek'] = df['Time'].dt.dayofweek / 6.0 - 0.5
+    df['Hour'] = df['Time'].dt.hour / 23.0 - 0.5
+
+    # 15分钟数据，minute // 15 会得到 0, 1, 2, 3
+    # 除以 3.0 映射到 [0, 1]，再减去 0.5 得到 [-0.5, 0.5]
+    df['Minute'] = (df['Time'].dt.minute // 15) / 3.0 - 0.5
 
     # 准备特征矩阵 X 和目标向量 y
-    feature_cols = ['TSI', 'DNI', 'GHI', 'Temp', 'Atmosphere', 'Humidity', 'Month', 'Hour', 'Day', 'DayOfWeek']
+    # 严格将时间特征踢出降维管线，让 Boruta 和 PCA 专注于处理天气数据
+    feature_cols = ['TSI', 'DNI', 'GHI', 'Temp', 'Atmosphere', 'Humidity']
     target_col = 'Power'
 
     X = df[feature_cols].values
@@ -102,10 +109,10 @@ def run_feature_optimization_pipeline(input_path, output_dir="processed_data"):
         'scaler_y': scaler_y,
         'pca': pca,
         'selected_features': selected_features,
-        # 新增：时间特征 (Month, Hour, Day, DayOfWeek) 用于 Informer 时间编码
-        'time_features': (df[['Month', 'Hour', 'Day', 'DayOfWeek']].values[:train_end],
-                          df[['Month', 'Hour', 'Day', 'DayOfWeek']].values[train_end:val_end],
-                          df[['Month', 'Hour', 'Day', 'DayOfWeek']].values[val_end:])
+        # 新增：时间特征 (Month, Day, Weekday, Hour, Minute) 用于 Informer 时间编码
+        'time_features': (df[['Month', 'Day', 'DayOfWeek', 'Hour', 'Minute']].values[:train_end],
+                          df[['Month', 'Day', 'DayOfWeek', 'Hour', 'Minute']].values[train_end:val_end],
+                          df[['Month', 'Day', 'DayOfWeek', 'Hour', 'Minute']].values[val_end:])
     }
 
     joblib.dump(bundle, os.path.join(output_dir, "model_ready_data.pkl"))

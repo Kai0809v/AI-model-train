@@ -134,7 +134,7 @@ class TCN_Informer_Model(nn.Module):
 
 
 
-# 导入官方的 Informer 模型，其实不加“Informer2020.”也能被识别到
+# TODO：导入官方的 Informer 模型，其实不加“Informer2020.”也能被识别到
 from Informer2020.models.model import Informer
 
 
@@ -165,7 +165,7 @@ class True_TCN_Informer(nn.Module):
             dropout=dropout,
             attn='prob',  # 真正的概率稀疏注意力！
             embed='timeF',  # 激活时间特征嵌入！
-            freq='h',  # 频率(h代表小时级别)
+            freq='t',  # TODO： 频率(h代表小时级别,t代表分钟级别，换数据的时候需要对齐)
             activation='gelu',
             output_attention=False
         )

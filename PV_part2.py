@@ -68,7 +68,8 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
     print(f"--- 启动训练引擎 (使用设备: {device}) ---")
 
     # 1. 获取数据
-    seq_len, label_len, pred_len = 96, 48, 24
+    # 扩大为观察过去 2 天 (192步) 或 3 天 (288步){parameter A}，预测未来 6 小时 (24步){parameter C}，并且保持B是A的一半
+    seq_len, label_len, pred_len = 192, 96, 24
     train_loader, val_loader, test_loader, bundle = create_dataloaders(
         pkl_path, seq_len=seq_len, label_len=label_len, pred_len=pred_len, batch_size=32
     )
@@ -80,23 +81,32 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
     # 2. 初始化模型 (稍后导入了重写后的 True_TCN_Informer)
     model = True_TCN_Informer(
         tcn_input_dim=input_dim,
-        tcn_channels=[32, 64, 128],
+        # ❌ tcn_channels=[32, 64, 128],
+        # ✅ 大幅削减 TCN 通道，只提取最核心的时序突变
+        tcn_channels=[16, 32],
         seq_len=seq_len,
         label_len=label_len,
         pred_len=pred_len,
-        d_model=512,
-        n_heads=8,
-        e_layers=3
+        # d_model=128, # 缩小模型维度，之前的应该比较臃肿
+        # 配合 TCN，d_model 也可以降下来
+        d_model=64,
+        n_heads=4,
+        e_layers=2,
+        dropout=0.15      # 加大随机失活率
     ).to(device)
 
-    # ❌ 抛弃容易被极端天气带偏的 MSE
-    # criterion = nn.MSELoss()
+    #  ~~抛弃容易被极端天气带偏的 MSE~~ 既然解决了过拟合问题，现在再使用 MSE
+    criterion = nn.MSELoss()
 
-    # ✅ 启用 Huber Loss
+    #  启用 Huber Loss
     # delta 参数控制了从 MSE 转变为 MAE 的临界点，可以后续用 NRBO 调优这个值
-    criterion = nn.HuberLoss(delta=2.0)
+    # criterion = nn.HuberLoss(delta=0.1)
 
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+    # 拉长退火周期，避免陷入局部最优
+    # optimizer = optim.Adam(model.parameters(), lr=0.0005, weight_decay=1e-4)
+    # ❌ optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+    # ✅ 将 weight_decay 放大 10 倍到 1e-3，严厉惩罚异常膨胀的权重
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-3)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=epochs, eta_min=1e-6
     )
@@ -193,10 +203,14 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
     trues = np.concatenate(trues_list, axis=0)
 
     # ⭐️ 核心步骤：反归一化 ⭐️
-    # 我们将预测值还原回真实的 Power (MW) 量纲
     preds_inverse = scaler_y.inverse_transform(preds.reshape(-1, 1)).reshape(preds.shape)
     trues_inverse = scaler_y.inverse_transform(trues.reshape(-1, 1)).reshape(trues.shape)
 
+    # 💡 终极物理约束：夜间强制归零
+    # 逻辑：如果这个时间点的真实功率微乎其微(比如小于设备装机容量的 0.5%)，
+    # 我们在物理上认定这是夜晚或极度恶劣无法发电的时刻，直接将预测值覆写为 0。
+    night_mask = (trues_inverse < 0.05)  # 假设 0.05 MW 以下算作无光照
+    preds_inverse[night_mask] = 0.0
     # 💡 物理约束，光伏功率不可能为负数
     preds_inverse = np.maximum(0, preds_inverse)
 
