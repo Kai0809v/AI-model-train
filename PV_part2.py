@@ -84,20 +84,23 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
         seq_len=seq_len,
         label_len=label_len,
         pred_len=pred_len,
-        d_model=256,
+        d_model=512,
         n_heads=8,
-        e_layers=2
+        e_layers=3
     ).to(device)
 
     # ❌ 抛弃容易被极端天气带偏的 MSE
     # criterion = nn.MSELoss()
 
     # ✅ 启用 Huber Loss
-    # delta 参数控制了从 MSE 转变为 MAE 的临界点，您可以后续用 NRBO 调优这个值
-    criterion = nn.HuberLoss(delta=1.0)
+    # delta 参数控制了从 MSE 转变为 MAE 的临界点，可以后续用 NRBO 调优这个值
+    criterion = nn.HuberLoss(delta=2.0)
 
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    early_stopping = EarlyStopping(patience=5, verbose=True)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=epochs, eta_min=1e-6
+    )
+    early_stopping = EarlyStopping(patience=10, verbose=True)
 
     train_losses, val_losses = [], []
 
@@ -148,6 +151,11 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
         train_losses.append(t_loss)
         val_losses.append(v_loss)
         print(f"Epoch: {epoch + 1:02d} | Train Loss: {t_loss:.5f} | Val Loss: {v_loss:.5f}")
+
+        # 更新学习率调度器 (CosineAnnealing 平滑下降)
+        scheduler.step()
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"           Learning Rate: {current_lr:.6f}")
 
         # 触发早停机制
         early_stopping(v_loss, model, path='best_tcn_informer.pth')

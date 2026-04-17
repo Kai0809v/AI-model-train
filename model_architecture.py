@@ -140,7 +140,7 @@ from Informer2020.models.model import Informer
 
 class True_TCN_Informer(nn.Module):
     def __init__(self, tcn_input_dim, tcn_channels, seq_len, label_len, pred_len,
-                 d_model=512, n_heads=8, e_layers=2, d_layers=1, dropout=0.05):
+                 d_model=512, n_heads=8, e_layers=3, d_layers=1, dropout=0.05):
         super(True_TCN_Informer, self).__init__()
 
         # 1. 依然保留 TCN 作为前置局部特征提取器
