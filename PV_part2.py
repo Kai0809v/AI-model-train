@@ -4,8 +4,6 @@ import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-import joblib
-import os
 
 # 导入前置模块
 from data_loader import create_dataloaders
@@ -78,7 +76,7 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
     input_dim = bundle['train'][0].shape[1]
     scaler_y = bundle['scaler_y']  # 用于反归一化
 
-    # 2. 初始化模型 (稍后导入了重写后的 True_TCN_Informer)
+    # 2. 初始化模型 (使用稳定的基线配置)
     model = True_TCN_Informer(
         tcn_input_dim=input_dim,
         # ❌ tcn_channels=[32, 64, 128],
@@ -87,8 +85,6 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
         seq_len=seq_len,
         label_len=label_len,
         pred_len=pred_len,
-        # d_model=128, # 缩小模型维度，之前的应该比较臃肿
-        # 配合 TCN，d_model 也可以降下来
         d_model=64,
         n_heads=4,
         e_layers=2,
@@ -106,12 +102,11 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
     # optimizer = optim.Adam(model.parameters(), lr=0.0005, weight_decay=1e-4)
     # ❌ optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     # ✅ 将 weight_decay 放大 10 倍到 1e-3，严厉惩罚异常膨胀的权重
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-3)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-3)# weight_decay=1e-3是一个比较理想的值，结果R2: 0.8926……
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=epochs, eta_min=1e-6
     )
     early_stopping = EarlyStopping(patience=10, verbose=True)
-
     train_losses, val_losses = [], []
 
     # 3. 训练循环
@@ -206,13 +201,18 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
     preds_inverse = scaler_y.inverse_transform(preds.reshape(-1, 1)).reshape(preds.shape)
     trues_inverse = scaler_y.inverse_transform(trues.reshape(-1, 1)).reshape(trues.shape)
 
-    # 💡 终极物理约束：夜间强制归零
+    # 💡 终极物理约束：夜间强制归零 + 功率上限限制
     # 逻辑：如果这个时间点的真实功率微乎其微(比如小于设备装机容量的 0.5%)，
     # 我们在物理上认定这是夜晚或极度恶劣无法发电的时刻，直接将预测值覆写为 0。
     night_mask = (trues_inverse < 0.05)  # 假设 0.05 MW 以下算作无光照
     preds_inverse[night_mask] = 0.0
-    # 💡 物理约束，光伏功率不可能为负数
+    
+    # 💡 物理约束1：光伏功率不可能为负数
     preds_inverse = np.maximum(0, preds_inverse)
+    
+    # 💡 物理约束2：光伏功率不应超过装机容量（假设130MW）
+    MAX_CAPACITY = 130.0  # MW TODO： 后需更换数据集时，需要根据实际情况调整
+    preds_inverse = np.minimum(preds_inverse, MAX_CAPACITY)
 
     # 计算整体指标 (针对未来所有预测步长的平均表现)
     metrics = calculate_metrics(trues_inverse.flatten(), preds_inverse.flatten())
@@ -220,6 +220,17 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
     for k, v in metrics.items():
         print(f"   {k}: {v:.4f}")
 
+    # 在计算 metrics 之后，加入残差分析绘图
+    residuals = trues_inverse.flatten() - preds_inverse.flatten()
+
+    plt.figure(figsize=(8, 6))
+    plt.hist(residuals, bins=50, color='teal', alpha=0.7, edgecolor='black')
+    plt.axvline(0, color='red', linestyle='dashed', linewidth=2)
+    plt.title('Prediction Residual Distribution')
+    plt.xlabel('Error (MW)')
+    plt.ylabel('Frequency')
+    plt.grid(axis='y', alpha=0.75)
+    plt.savefig('residual_histogram.png', dpi=300, bbox_inches='tight')
     # ==========================================
     # 8. 可视化预测结果 (抽取第一个样本的连续 24 小时预测)
     # ==========================================
