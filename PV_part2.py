@@ -66,8 +66,9 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
     print(f"--- 启动训练引擎 (使用设备: {device}) ---")
 
     # 1. 获取数据
-    # 扩大为观察过去 2 天 (192步) 或 3 天 (288步){parameter A}，预测未来 6 小时 (24步){parameter C}，并且保持B是A的一半
-    seq_len, label_len, pred_len = 192, 96, 24
+    # 🏆 基于序列长度实验结果，采用1天历史窗口（最优配置）
+    # 实验对比：1天(R²=0.9788) > 3天(0.9738) > 1.5天(0.9750) > 2天(0.9698)
+    seq_len, label_len, pred_len = 96, 48, 24
     train_loader, val_loader, test_loader, bundle = create_dataloaders(
         pkl_path, seq_len=seq_len, label_len=label_len, pred_len=pred_len, batch_size=32
     )
@@ -100,9 +101,10 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
 
     # 拉长退火周期，避免陷入局部最优
     # optimizer = optim.Adam(model.parameters(), lr=0.0005, weight_decay=1e-4)
-    # ❌ optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     # ✅ 将 weight_decay 放大 10 倍到 1e-3，严厉惩罚异常膨胀的权重
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-3)# weight_decay=1e-3是一个比较理想的值，结果R2: 0.8926……
+    # ❌ optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-3)
+    # 1e-3好像过于严格了，让模型欠拟合了，改回1e-4
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=epochs, eta_min=1e-6
     )

@@ -139,13 +139,21 @@ def run_feature_optimization_pipeline(input_path, output_dir="processed_data"):
     X_test_boruta = X_test_scaled[:, selected_indices]
 
     # 后面试试0.98。  5、6步如果用了气象因子更多的数据集或许作用更显著些？
-    print("6. 执行 PCA 降维 (消除共线性，保留 95% 信息)...")
-    pca = PCA(n_components=0.95)
+    # 4.2:尝试0.98->0.95(回退)
+    PCA_components = 0.95
+    print(f"6. 执行 PCA 降维 (消除共线性，保留 {PCA_components*100}% 信息)...")
+    pca = PCA(n_components=PCA_components)
     X_train_pca = pca.fit_transform(X_train_boruta)
     X_val_pca = pca.transform(X_val_boruta)
     X_test_pca = pca.transform(X_test_boruta)
 
     print(f"   -> PCA 完成：维度从 {X_train_boruta.shape[1]} 降至 {pca.n_components_}")
+    # === 这一块用在写文章中，展示 PCA 降维后的主成分方差贡献率，需要的话再绘制图表 ===
+    print(f"   -> 各主成分方差贡献率:")
+    for i in range(pca.n_components_):
+        print(f"      PC{i+1}: {pca.explained_variance_ratio_[i]:.4f} "
+              f"(累积: {sum(pca.explained_variance_ratio_[:i+1]):.4f})")
+    # ====================================================================
 
     print("7. 保存优化后的数据包与模型...")
     # 打包所有组件，方便后续 TCN-Informer 直接加载
