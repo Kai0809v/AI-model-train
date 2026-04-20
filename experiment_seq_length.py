@@ -1,7 +1,7 @@
 """
 序列长度对比实验脚本
-自动测试不同的 seq_len 配置，找到最优的历史窗口长度
-TODO：这个做出来的是相同Boruta+PCA的配置下不同序列长度的对比实验
+自动测试不同的 seq_len 和 weight_decay 配置组合
+TODO：探索序列长度与正则化强度的交互效应
 """
 
 import torch
@@ -50,7 +50,8 @@ class EarlyStopping:
 
 
 def train_single_config(pkl_path, seq_len, label_len, pred_len=24, epochs=50, 
-                       learning_rate=0.001, device='cuda' if torch.cuda.is_available() else 'cpu'):
+                       learning_rate=0.001, weight_decay=1e-4,
+                       device='cuda' if torch.cuda.is_available() else 'cpu'):
     """
     训练单个配置并返回测试结果
     """
@@ -85,7 +86,7 @@ def train_single_config(pkl_path, seq_len, label_len, pred_len=24, epochs=50,
     
     # 3. 训练配置
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
     early_stopping = EarlyStopping(patience=10, verbose=True)
     
@@ -177,13 +178,15 @@ def train_single_config(pkl_path, seq_len, label_len, pred_len=24, epochs=50,
     mae = mean_absolute_error(trues_inverse.flatten(), preds_inverse.flatten())
     r2 = r2_score(trues_inverse.flatten(), preds_inverse.flatten())
     
-    metrics = {'MSE': mse, 'RMSE': rmse, 'MAE': mae, 'R2': r2}
+    metrics = {'MSE': mse, 'RMSE': rmse, 'MAE': mae, 'R2': r2, 
+               'weight_decay': weight_decay, 'stopped_epoch': epoch+1}
     
     print(f"\n📊 测试结果:")
     print(f"   MSE:  {mse:.4f}")
     print(f"   RMSE: {rmse:.4f}")
     print(f"   MAE:  {mae:.4f}")
     print(f"   R²:   {r2:.4f}")
+    print(f"   weight_decay: {weight_decay}")
     
     # 清理临时文件
     if os.path.exists('temp_seq_exp.pth'):
@@ -192,67 +195,90 @@ def train_single_config(pkl_path, seq_len, label_len, pred_len=24, epochs=50,
     return metrics
 
 
-def run_seq_length_experiment(pkl_path="processed_data/model_ready_data.pkl"):
+def run_seq_length_experiment(pkl_path="processed_data/model_ready_data.pkl",
+                             test_weight_decay=True):
     """
     运行完整的序列长度对比实验
+    
+    :param test_weight_decay: 是否同时测试不同的 weight_decay
     """
     print("=" * 70)
-    print("🔬 序列长度对比实验")
+    print("🔬 序列长度与正则化强度对比实验")
     print("=" * 70)
-    print("\n将测试以下配置:")
-    print("  1. seq_len=96  (1天历史)")
-    print("  2. seq_len=144 (1.5天历史)")
-    print("  3. seq_len=192 (2天历史) ← 当前基线")
-    print("  4. seq_len=288 (3天历史)")
-    print("\n预计总耗时: 约30-60分钟（取决于GPU性能）\n")
+    
+    if test_weight_decay:
+        print("\n📋 实验设计：测试 seq_len × weight_decay 的组合")
+        print("  序列长度: 96, 144, 192, 288")
+        print("  weight_decay: 1e-4, 1e-3")
+        print("  总配置数: 4 × 2 = 8 个")
+    else:
+        print("\n将测试以下配置:")
+        print("  1. seq_len=96  (1天历史)")
+        print("  2. seq_len=144 (1.5天历史)")
+        print("  3. seq_len=192 (2天历史)")
+        print("  4. seq_len=288 (3天历史)")
+    
+    print("\n预计总耗时: 约60-120分钟（取决于GPU性能）\n")
     
     input("按回车键开始实验...")
     
     # 定义测试配置
-    configs = [
-        {"seq_len": 96, "label_len": 48, "name": "1天历史"},
-        {"seq_len": 144, "label_len": 72, "name": "1.5天历史"},
-        {"seq_len": 192, "label_len": 96, "name": "2天历史(基线)"},
-        {"seq_len": 288, "label_len": 144, "name": "3天历史"},
+    seq_configs = [
+        {"seq_len": 96, "label_len": 48, "name": "1天历史(96)"},
+        {"seq_len": 144, "label_len": 72, "name": "1.5天历史(144)"},
+        {"seq_len": 192, "label_len": 96, "name": "2天历史(192)"},
+        {"seq_len": 288, "label_len": 144, "name": "3天历史(288)"},
     ]
     
+    weight_decays = [1e-4, 1e-3] if test_weight_decay else [1e-4]
+    
     results = []
+    total_tests = len(seq_configs) * len(weight_decays)
+    test_count = 0
     
     # 逐个测试
-    for i, config in enumerate(configs, 1):
-        print(f"\n{'#'*70}")
-        print(f"# 实验 {i}/{len(configs)}: {config['name']}")
-        print(f"{'#'*70}")
-        
-        metrics = train_single_config(
-            pkl_path=pkl_path,
-            seq_len=config['seq_len'],
-            label_len=config['label_len'],
-            pred_len=24,
-            epochs=50,
-            learning_rate=0.001
-        )
-        
-        if metrics:
-            results.append({
-                'config': config,
-                'metrics': metrics
-            })
-        
-        print(f"\n✅ 实验 {i} 完成！")
-        
-        # 如果不是最后一个，询问是否继续
-        if i < len(configs):
-            print("\n提示: 可以休息片刻，或继续下一个实验")
-            input("按回车键继续下一个配置...")
+    for wd in weight_decays:
+        for config in seq_configs:
+            test_count += 1
+            print(f"\n{'#'*70}")
+            print(f"# 实验 {test_count}/{total_tests}: {config['name']} + wd={wd}")
+            print(f"{'#'*70}")
+            
+            metrics = train_single_config(
+                pkl_path=pkl_path,
+                seq_len=config['seq_len'],
+                label_len=config['label_len'],
+                pred_len=24,
+                epochs=50,
+                learning_rate=0.001,
+                weight_decay=wd
+            )
+            
+            if metrics:
+                results.append({
+                    'config': config,
+                    'weight_decay': wd,
+                    'metrics': metrics
+                })
+            
+            print(f"\n✅ 实验 {test_count} 完成！")
+            
+            # 如果不是最后一个，询问是否继续
+            if test_count < total_tests:
+                print("\n提示: 可以休息片刻，或继续下一个实验")
+                input("按回车键继续下一个配置...")
     
     # 汇总结果
     print("\n" + "=" * 70)
     print("📊 实验结果汇总")
     print("=" * 70)
     
-    print(f"\n{'配置':<20} {'R²':<10} {'RMSE':<10} {'MAE':<10} {'MSE':<10}")
-    print("-" * 70)
+    if test_weight_decay:
+        print(f"\n{'配置':<25} {'wd':<10} {'R²':<10} {'RMSE':<10} {'MAE':<10} {'早停轮数':<10}")
+        print("-" * 85)
+    else:
+        print(f"\n{'配置':<20} {'R²':<10} {'RMSE':<10} {'MAE':<10} {'MSE':<10}")
+        print("-" * 70)
     
     best_r2 = -1
     best_config = None
@@ -260,16 +286,25 @@ def run_seq_length_experiment(pkl_path="processed_data/model_ready_data.pkl"):
     for result in results:
         config_name = result['config']['name']
         m = result['metrics']
-        print(f"{config_name:<20} {m['R2']:<10.4f} {m['RMSE']:<10.4f} {m['MAE']:<10.4f} {m['MSE']:<10.4f}")
+        wd = result['weight_decay']
+        
+        if test_weight_decay:
+            stopped = m.get('stopped_epoch', 'N/A')
+            print(f"{config_name:<25} {wd:<10.0e} {m['R2']:<10.4f} {m['RMSE']:<10.4f} {m['MAE']:<10.4f} {stopped:<10}")
+        else:
+            print(f"{config_name:<20} {m['R2']:<10.4f} {m['RMSE']:<10.4f} {m['MAE']:<10.4f} {m['MSE']:<10.4f}")
         
         if m['R2'] > best_r2:
             best_r2 = m['R2']
             best_config = result
     
-    print("-" * 70)
-    print(f"\n🏆 最佳配置: {best_config['config']['name']}")
+    print("-" * 85 if test_weight_decay else "-" * 70)
+    print(f"\n🏆 最佳配置:")
+    print(f"   序列长度: {best_config['config']['name']}")
+    print(f"   weight_decay: {best_config['weight_decay']:.0e}")
     print(f"   R² = {best_config['metrics']['R2']:.4f}")
     print(f"   RMSE = {best_config['metrics']['RMSE']:.4f}")
+    print(f"   MAE = {best_config['metrics']['MAE']:.4f}")
     
     # 可视化对比
     plot_results(results)
@@ -323,41 +358,56 @@ def plot_results(results):
     plt.show()
 
 
-def save_results(results, best_config):
+def save_results(results, best_config, test_weight_decay=True):
     """
     保存实验结果到文本文件
     """
     with open('seq_length_results.txt', 'w', encoding='utf-8') as f:
         f.write("=" * 70 + "\n")
-        f.write("序列长度对比实验结果\n")
+        f.write("序列长度与正则化强度对比实验结果\n")
         f.write("=" * 70 + "\n\n")
         
         for result in results:
             config = result['config']
             m = result['metrics']
+            wd = result['weight_decay']
+            
             f.write(f"配置: {config['name']}\n")
             f.write(f"  seq_len: {config['seq_len']}\n")
             f.write(f"  label_len: {config['label_len']}\n")
+            f.write(f"  weight_decay: {wd:.0e}\n")
             f.write(f"  MSE:  {m['MSE']:.4f}\n")
             f.write(f"  RMSE: {m['RMSE']:.4f}\n")
             f.write(f"  MAE:  {m['MAE']:.4f}\n")
-            f.write(f"  R²:   {m['R2']:.4f}\n\n")
+            f.write(f"  R²:   {m['R2']:.4f}\n")
+            if 'stopped_epoch' in m:
+                f.write(f"  早停轮数: {m['stopped_epoch']}\n")
+            f.write("\n")
         
         f.write("-" * 70 + "\n")
-        f.write(f"🏆 最佳配置: {best_config['config']['name']}\n")
+        f.write(f"🏆 最佳配置:\n")
+        f.write(f"   序列长度: {best_config['config']['name']}\n")
         f.write(f"   seq_len: {best_config['config']['seq_len']}\n")
+        f.write(f"   weight_decay: {best_config['weight_decay']:.0e}\n")
         f.write(f"   R²: {best_config['metrics']['R2']:.4f}\n")
         f.write(f"   RMSE: {best_config['metrics']['RMSE']:.4f}\n")
+        f.write(f"   MAE: {best_config['metrics']['MAE']:.4f}\n")
     
     print("📝 详细结果已保存: seq_length_results.txt")
 
 
 if __name__ == "__main__":
-    results, best = run_seq_length_experiment()
+    # 默认启用 weight_decay 对比实验
+    results, best = run_seq_length_experiment(test_weight_decay=True)
     
     print("\n" + "=" * 70)
     print("✅ 实验全部完成！")
     print("=" * 70)
-    print(f"\n建议下一步:")
+    print(f"\n💡 建议下一步:")
     print(f"  修改 PV_part2.py 第70行为:")
     print(f"  seq_len, label_len, pred_len = {best['config']['seq_len']}, {best['config']['label_len']}, 24")
+    print(f"\n  修改 optimizer 的 weight_decay 为: {best['weight_decay']:.0e}")
+    print(f"\n📊 最终性能指标:")
+    print(f"  R² = {best['metrics']['R2']:.4f}")
+    print(f"  RMSE = {best['metrics']['RMSE']:.4f}")
+    print(f"  MAE = {best['metrics']['MAE']:.4f}")

@@ -2,9 +2,10 @@
 
 ## 📊 当前配置
 
-**最新性能指标**: R² = 0.9788, RMSE = 3.88, MAE = 1.78 (seq_len=96)
+**最新性能指标**: R² = 0.9810, RMSE = 3.67, MAE = 1.75 (seq_len=96)
 
 **模型配置**:
+模型配置在过往历史中并没有全部同步记录
 ```python
 seq_len=96, label_len=48, pred_len=24  # 🏆 1天历史窗口（最优）
 tcn_channels=[16, 32]
@@ -13,9 +14,10 @@ n_heads=4
 e_layers=2
 dropout=0.15
 criterion=MSELoss()
-optimizer=Adam(lr=0.001, weight_decay=1e-3)
-scheduler=CosineAnnealingLR
+optimizer=Adam(lr=0.001, weight_decay=1e-4)
+scheduler=CosineAnnealingLR(T_max=epochs, eta_min=1e-6)
 patience=10
+batch_size=32
 ```
 
 ---
@@ -35,6 +37,7 @@ patience=10
 3. **已采取的行动**
    - [x] 优先级1，特征工程优化（R²从0.892提升至0.972）
    - [x] 序列长度实验（找到最优seq_len=96，R²进一步提升至0.979）
+   - [x] weight_decay优化（R²从0.979提升至0.981）
 
 
 ---
@@ -72,9 +75,11 @@ EarlyStopping counter: 10 out of 10
 
 ## 🎯 推荐的下一步行动
 
+详见 [IMPROVEMENTS.md](IMPROVEMENTS.md) 中的“下一步优化方案”章节
+
 ### 优先级 1：集成学习（简单有效）
 
-**目标**: R² 提升至 0.980~0.982，提升稳定性
+**目标**: R² 提升至 0.982~0.984，提升稳定性
 
 **具体任务**:
 - [ ] 训练5个不同随机种子的模型
@@ -87,14 +92,14 @@ EarlyStopping counter: 10 out of 10
 
 ### 优先级 2：NRBO自动调优（精细优化）
 
-**目标**: R² 提升至 0.980~0.985
+**目标**: R² 提升至 0.982~0.985
 
 **前提条件**: 
-- 当前配置已经非常稳定（R² = 0.9788）
+- 当前配置已经非常稳定（R² = 0.9810）
 - 已找到最优序列长度
 
 **具体任务**:
-```text
+```bash
 pip install optuna
 python nrbo_tuner.py
 ```

@@ -66,7 +66,7 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
     print(f"--- 启动训练引擎 (使用设备: {device}) ---")
 
     # 1. 获取数据
-    # 🏆 基于序列长度实验结果，采用1天历史窗口（最优配置）
+     # 🏆 基于序列长度实验结果，采用1天历史窗口（最优配置）
     # 实验对比：1天(R²=0.9788) > 3天(0.9738) > 1.5天(0.9750) > 2天(0.9698)
     seq_len, label_len, pred_len = 96, 48, 24
     train_loader, val_loader, test_loader, bundle = create_dataloaders(

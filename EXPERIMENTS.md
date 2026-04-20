@@ -125,7 +125,7 @@ EarlyStopping counter: 10 out of 10
 **改动内容**: 尝试不同序列长度（96/144/192/288）
 
 **结果**:  
-以下结果是`experiment_seq_length.py`以weight_decay=1e-4运行的结果
+以下结果是`experiment_seq_length.py`以weight_decay=1e-4运行的结果,之前是1e-3
 ```text
 1. seq_len=96  (1天历史)
   Epoch 50/50 | Train: 0.01176 | Val: 0.01380
@@ -205,13 +205,17 @@ EarlyStopping counter: 10 out of 10
 > ### 思考🤔  
 > - 为什么时间序列长的早停的快一些？  
 > - 如果增大模型容量，使用长的时间序列的优势是不是会显现出来？对Boruta+PCA的参数该怎么调整？  
-> - 如果序列列长度不同，optimizer的参数应该也要调整，之前`weight_decay`=`1e-3`太严格了，导致模型拟合程度不如`1e-4`
+> - 实验可见weight_decay=1e-4情况下，seq_len=96最佳，但如果序列列长度不同，optimizer的weight_decay参数应该也要调整吧？或者说，二者怎样搭配效果更好？
+> - - 实验“seq_len=96”+“weight_decay=1e-3”时，MSE: 20.3475、RMSE: 4.5108、MAE: 2.3769、R2: 0.9714
+> - - 实验“seq_len=192”+“weight_decay=1e-3”时，MSE: 19.6117、RMSE: 4.4285、MAE: 2.0927、R2: 0.9724
+> - - 实验“seq_len=96”+“weight_decay=1e-4”时，MSE: 15.0913、RMSE: 3.8847、MAE: 1.7845、R2: 0.9788
 
 
-### 实验 #X - [简短描述]
+
+### 实验 #5 - 调整`weight_decay`
 **日期**: 2026年4月19日  
 **改动内容**: 
-调整了optimizer weight_decay=1e-4
+调整了`optimizer的weight_decay`1e-3 -> 1e-4
 **结果**:
 ```text
 Epoch: 50 | Train Loss: 0.01048 | Val Loss: 0.01342
