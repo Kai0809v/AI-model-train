@@ -186,6 +186,70 @@ class True_TCN_Informer(nn.Module):
         # 官方 Informer 的输出形状通常是 [Batch, pred_len, c_out]
         return dec_out
 
+
+class BaselineFCModel(nn.Module):
+    def __init__(self, input_dim, pred_len=24, hidden_dim=128, dropout=0.2):
+        super(BaselineFCModel, self).__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, pred_len)
+        )
+
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
+        x = x_enc[:, -1, :]
+        out = self.fc(x)
+        return out.unsqueeze(-1)
+
+
+class InformerOnlyModel(nn.Module):
+    def __init__(self, input_dim, seq_len, label_len, pred_len,
+                 d_model=64, n_heads=4, e_layers=2, d_layers=1, dropout=0.15):
+        super(InformerOnlyModel, self).__init__()
+        
+        self.informer = Informer(
+            enc_in=input_dim, dec_in=input_dim, c_out=1,
+            seq_len=seq_len, label_len=label_len, out_len=pred_len,
+            factor=5, d_model=d_model, n_heads=n_heads,
+            e_layers=e_layers, d_layers=d_layers, d_ff=d_model * 4,
+            dropout=dropout, attn='prob', embed='timeF', freq='t',
+            activation='gelu', output_attention=False
+        )
+
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
+        return self.informer(x_enc, x_mark_enc, x_dec, x_mark_dec)
+
+
+class TCN_LinearModel(nn.Module):
+    def __init__(self, input_dim, tcn_channels, pred_len=24, dropout=0.15):
+        super(TCN_LinearModel, self).__init__()
+        
+        self.tcn = TemporalConvNet(num_inputs=input_dim, num_channels=tcn_channels, dropout=dropout)
+        tcn_out_dim = tcn_channels[-1]
+        
+        self.fc = nn.Sequential(
+            nn.Linear(tcn_out_dim, tcn_out_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(tcn_out_dim // 2, pred_len)
+        )
+
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, pred_len=None):
+        """
+        TCN + Linear 模型
+        :param x_enc: [batch, seq_len, features]
+        :return: [batch, pred_len, 1]
+        """
+        tcn_out = self.tcn(x_enc)  # [batch, seq_len, tcn_out_dim]
+        # 只取最后一个时间步的特征作为整个序列的表示
+        tcn_last_feature = tcn_out[:, -1, :]  # [batch, tcn_out_dim]
+        # 通过全连接层直接预测未来pred_len个时间点
+        out = self.fc(tcn_last_feature)  # [batch, pred_len]
+        return out.unsqueeze(-1)  # [batch, pred_len, 1]
+
 # 测试代码是否能跑通
 if __name__ == "__main__":
     # 模拟 PCA 降维后保留了 3 个主成分，加上 4 个时间特征，共 7 个特征

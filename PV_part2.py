@@ -67,7 +67,7 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
 
     # 1. 获取数据
      # 🏆 基于序列长度实验结果，采用1天历史窗口（最优配置）
-    # 实验对比：1天(R²=0.9788) > 3天(0.9738) > 1.5天(0.9750) > 2天(0.9698)
+    # 关于序列长度的实验结果，见 experiment.md 实验#4.3
     seq_len, label_len, pred_len = 96, 48, 24
     train_loader, val_loader, test_loader, bundle = create_dataloaders(
         pkl_path, seq_len=seq_len, label_len=label_len, pred_len=pred_len, batch_size=32

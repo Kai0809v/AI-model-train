@@ -1,15 +1,12 @@
 # 光伏功率预测系统 (PV Power Forecasting)
 
-基于 **TCN-Informer** 混合深度学习架构的光伏功率预测系统，结合 **Boruta特征选择**、**PCA降维** 和 **NRBO超参数自动优化**。
+基于 **TCN-Informer** 混合深度学习架构的光伏功率预测系统，结合 **Boruta特征选择**、**PCA降维** 和 **NRBO超参数自动优化**（未来计划）。
 
-## 📊 性能指标 旧：
+## 📊 性能指标：
 
-
-| 阶段 | MSE | RMSE | MAE | R² |
-|------|-----|------|-----|-----|
-| **基线** | 76.86 | 8.77 | 4.00 | 0.8920 |
-| **改进后** | ~65-70 | ~7.5-8.0 | ~3.5-3.7 | ~0.91-0.92 |
-| **NRBO优化后** | ~60-65 | ~7.0-7.5 | ~3.2-3.5 | ~0.92-0.94 |
+   RMSE: 3.6731
+   MAE: 1.7523
+   R2: 0.9810
 
 > 💡 运行 `python quick_test.py` 查看当前模型性能对比
 
@@ -20,6 +17,8 @@
 ### 1. 环境准备
 ```bash
 pip install torch pandas numpy scikit-learn matplotlib joblib boruta-py optuna
+# 可选
+pip install optuna
 ```
 
 ### 2. 数据处理与训练
