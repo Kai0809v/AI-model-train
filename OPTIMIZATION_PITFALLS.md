@@ -26,6 +26,95 @@ scheduler=CosineAnnealingLR
 
 ## ❌ 已验证的失败方向
 
+### 失败案例 #4：功率滞后特征导致数据泄露 ⚠️ 严重
+
+**尝试配置**：
+```python
+# 在 PV_part1.py 中添加
+for lag_steps in [4, 12, 24]:
+    df[f'Power_lag_{lag_hours}h'] = df['Power'].shift(lag_steps)
+
+df['Power_rolling_mean_24h'] = df['Power'].rolling(96).mean()
+df['Power_rolling_std_24h'] = df['Power'].rolling(96).std()
+```
+
+**结果**：
+- R²: **虚高至 0.9788**
+- RMSE: **虚假降低至 3.88**
+- **存在严重的数据泄露问题，指标大幅虚高**
+
+**数据泄露原因分析**：
+
+1. **滞后特征的本质问题**：
+   ```
+   时间点 t: 预测 Power(t+1), Power(t+2), ..., Power(t+24)
+   滞后特征: Power_lag_1h = Power(t-3)  ← 这是过去的值
+   
+   但在滑动窗口中：
+   - seq_x = features[t:t+96]     # 包含 t 到 t+95 的特征
+   - target_y = targets[t+96:t+120] # 预测 t+96 到 t+119
+   
+   问题：这些滞后值是在整个数据集上预先计算的
+   测试集的 Power_lag_1h 依赖于测试集内部的过去功率值
+   在实际部署时，您无法获得这些"过去值"（因为要预测的就是未来功率）
+   ```
+
+2. **滚动统计量更严重**：
+   ```python
+   df['Power_rolling_mean_24h'] = df['Power'].rolling(window=96).mean()
+   ```
+   - 滚动均值在时间 `t` = mean(Power[t-95:t])
+   - **这个计算是在整个数据集上一次性完成的**
+   - 包括训练集、验证集、测试集的所有数据都参与了滚动计算
+   - **测试集的滚动统计量"看到"了测试集窗口内的所有数据！**
+
+3. **时序划分顺序错误**：
+   ```python
+   # 错误的顺序：
+   df['Power_lag_1h'] = df['Power'].shift(4)  # 先计算特征
+   df['Power_rolling_mean'] = df['Power'].rolling(96).mean()
+   
+   X_train = X[:train_end]  # 后划分数据集
+   X_test = X[val_end:]
+   
+   # 正确的顺序应该是：
+   X_train, X_test = train_test_split(...)  # 先划分
+   # 然后在训练集上单独计算滞后和滚动特征
+   ```
+
+**为什么指标虚高**：
+- 模型"偷看"了过去的功率值来预测未来
+- 光伏功率具有强自相关性，知道过去值就能很好地预测未来
+- 但这在实际应用中是不可能的（您要预测的就是未来功率）
+- **相当于考试前偷偷看了答案**
+
+**正确做法**：
+```python
+# ✅ 只使用气象特征及其交互项（无数据泄露风险）
+feature_cols = [
+    'TSI', 'DNI', 'GHI', 'Temp', 'Atmosphere', 'Humidity',
+    'TSI_Temp_interaction', 'GHI_Temp_interaction',
+    'TSI_Humidity_ratio', 'GHI_Humidity_ratio',
+    'DNI_GHI_ratio', 'Temp_squared'
+]
+
+# ❌ 移除所有功率相关的滞后和滚动特征
+# 'Power_lag_1h', 'Power_lag_3h', 'Power_lag_6h',
+# 'Power_rolling_mean_24h', 'Power_rolling_std_24h'
+```
+
+**教训**：
+> ⚠️ **任何基于目标变量（Power）的历史值构建的特征都存在数据泄露风险**
+> 
+> 除非：
+> 1. 在时序划分**之后**单独为每个集合计算
+> 2. 使用严格的滚动窗口，确保不"偷看"未来
+> 3. 在实际部署时能够获得这些历史值
+>
+> **对于光伏功率预测，最安全的做法是只使用气象特征**
+
+---
+
 ### 失败案例 #1：过度增强模型容量
 
 **尝试配置**：
@@ -174,6 +263,6 @@ learning_rate=0.001
 
 ---
 
-**最后更新**: 2026-04-18  
+**最后更新**: 2026-04-23  
 **维护者**: Kai0809v  
 **版本**: v0.4

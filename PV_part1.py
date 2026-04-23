@@ -50,21 +50,7 @@ def run_feature_optimization_pipeline(input_path, output_dir="processed_data"):
     print("2.5. 🆕 构建增强特征（滞后特征 + 滚动统计量 + 非线性交互）...")
     
     # === 特征工程优化 1: 滞后特征 ===
-    # 过去 1h (4步), 3h (12步), 6h (24步) 的功率值
-    for lag_steps in [4, 12, 24]:
-        lag_hours = lag_steps // 4
-        df[f'Power_lag_{lag_hours}h'] = df['Power'].shift(lag_steps)
-    
-    # === 特征工程优化 2: 滚动统计量 ===
-    # 过去 24小时 (96步) 的均值和标准差
-    rolling_window = 96  # 24小时 * 4个15分钟
-    df['Power_rolling_mean_24h'] = df['Power'].rolling(window=rolling_window, min_periods=1).mean()
-    df['Power_rolling_std_24h'] = df['Power'].rolling(window=rolling_window, min_periods=1).std()
-    
-    # 过去 6小时 (24步) 的均值
-    rolling_window_6h = 24
-    df['Power_rolling_mean_6h'] = df['Power'].rolling(window=rolling_window_6h, min_periods=1).mean()
-    
+
     # === 特征工程优化 3: 非线性交互特征 ===
     # 辐照度与温度的交互（影响光伏板效率）
     df['TSI_Temp_interaction'] = df['TSI'] * df['Temp']
@@ -84,15 +70,13 @@ def run_feature_optimization_pipeline(input_path, output_dir="processed_data"):
     df.ffill(inplace=True)
     df.bfill(inplace=True)  # 处理开头的NaN
     
-    print(f"   -> 新增特征数量: 12个（3个滞后 + 3个滚动统计 + 6个交互特征）")
+    print(f"   -> 新增特征: 3个滞后 + 6个交互特征")
 
     # 准备特征矩阵 X 和目标向量 y
     # 严格将时间特征踢出降维管线，让 Boruta 和 PCA 专注于处理天气数据
     # 🆕 扩展特征列表，包含新增的增强特征
     feature_cols = [
         'TSI', 'DNI', 'GHI', 'Temp', 'Atmosphere', 'Humidity',  # 原始气象特征
-        'Power_lag_1h', 'Power_lag_3h', 'Power_lag_6h',  # 滞后特征
-        'Power_rolling_mean_24h', 'Power_rolling_std_24h', 'Power_rolling_mean_6h',  # 滚动统计
         'TSI_Temp_interaction', 'GHI_Temp_interaction',  # 交互特征
         'TSI_Humidity_ratio', 'GHI_Humidity_ratio',  # 比值特征
         'DNI_GHI_ratio',  # 云层指标

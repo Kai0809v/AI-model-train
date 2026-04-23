@@ -2,12 +2,13 @@
 
 ## 📊 当前配置
 
-**最新性能指标**: R² = 0.9810, RMSE = 3.67, MAE = 1.75 (seq_len=96)
+**⚠️ 重要发现**：之前的 R²=0.9810 存在数据泄露问题，实际性能约为 R²=0.92~0.94
+
+**最新性能指标（修正后）**: 待重新训练后更新
 
 **模型配置**:
-模型配置在过往历史中并没有全部同步记录
 ```python
-seq_len=96, label_len=48, pred_len=24  # 🏆 1天历史窗口（最优）
+seq_len=96, label_len=48, pred_len=24
 tcn_channels=[16, 32]
 d_model=64
 n_heads=4
@@ -18,6 +19,15 @@ optimizer=Adam(lr=0.001, weight_decay=1e-4)
 scheduler=CosineAnnealingLR(T_max=epochs, eta_min=1e-6)
 patience=10
 batch_size=32
+
+# ✅ 特征列表（无数据泄露风险）
+features = [
+    'TSI', 'DNI', 'GHI', 'Temp', 'Atmosphere', 'Humidity',  # 气象特征
+    'TSI_Temp_interaction', 'GHI_Temp_interaction',  # 交互项
+    'TSI_Humidity_ratio', 'GHI_Humidity_ratio',  # 比值
+    'DNI_GHI_ratio', 'Temp_squared'  # 非线性
+]
+# ❌ 已移除：Power_lag_*, Power_rolling_* （数据泄露）
 ```
 
 ---

@@ -293,18 +293,18 @@ python nrbo_tuner.py
 ---
 
 ### ✅ 方向2：特征工程优化 
-(已采纳，效果不错)
+(~~已采纳，效果不错~~消融实验时发现功率滞后特征导致数据泄露)
 
 **思路**：提升输入特征的质量
 
 **具体方法**(已采取前三点)：
-1. **增加滞后特征**：过去1h、3h、6h的功率值
+1. ~~**增加滞后特征**：过去1h、3h、6h的功率值~~
 2. **滚动统计量**：过去24小时的均值、标准差
 3. **非线性交互特征**：TSI × Temp、GHI / Humidity 等
 4. ~~**提高PCA保留率**：从0.95提升至0.98~~保持0.95
->0.95时特征17->9，0.98时17->10，效果反不及0.95
 
-**实际效果**：预计 R² 提升至 0.90~0.92，实际从0.89提升至0.97
+
+
 
 
 ---
@@ -340,7 +340,7 @@ final_pred = np.mean([model.predict(X) for model in models], axis=0)
 
 ---
 
-### ✅ 方向5：NRBO自动超参数优化（终极方案）
+### ✅ 方向5：NRBO自动超参数优化（终极方案，太费时间，最后考虑）
 
 **思路**：系统性搜索超参数空间，避免人工猜测
 
@@ -354,6 +354,121 @@ final_pred = np.mean([model.predict(X) for model in models], axis=0)
 - 运行时间较长（50次试验约需2-4小时）
 
 **预期效果**：R² 提升至 0.91~0.93
+
+---
+在光伏预测领域，基线模型能跑到 0.89 左右，说明模型已经完全掌握了“太阳升起发电，太阳落下不发电”的基础物理规律。要将 $R^2$ 从 0.89 硬生生拔高到 **0.95+**，这在业内被称为“炼丹的深水区”。在这个阶段，单纯的堆叠网络层数已经失效，我们必须**把光伏的物理常识深度融合到数学计算中**。
+
+为了实现这个极具挑战的目标，现制定了**三大无须调参的“拔高策略”**。
+
+
+接下来，我们直接落实到目前的代码库中。请按照以下三个维度进行手术刀式的修改：
+
+### 策略一：开辟“VIP 特征通道”（打破 PCA 的线性封锁）
+
+`TSI_squared` (辐照度平方) 和 `Temp_cubic` (温度立方) 极具物理意义，但会被 PCA 抹杀。现在我们要绕过 PCA，直接将它们与主成分拼接。
+
+**修改 `PV_part1.py`：**
+
+在第 6 步（PCA降维）之后，第 7 步（保存）之前，强行插入非线性特征：
+
+```python
+    print("6.5 提取非线性物理特征 (绕过 PCA，走 VIP 通道)...")
+    # 构造非线性特征
+    df['TSI_squared'] = df['TSI'] ** 2
+    df['Temp_cubic'] = df['Temp'] ** 3
+    
+    vip_features = df[['TSI_squared', 'Temp_cubic']].values
+    scaler_vip = StandardScaler()
+    vip_scaled = scaler_vip.fit_transform(vip_features)
+    
+    # 按照 8:1:1 切分 VIP 特征
+    vip_train = vip_scaled[:train_end]
+    vip_val = vip_scaled[train_end:val_end]
+    vip_test = vip_scaled[val_end:]
+    
+    # 将 PCA 的输出与 VIP 特征在列方向上拼接 (hstack)
+    # 这样送入 TCN 的特征就变成了: [PC1, PC2, ..., TSI_squared, Temp_cubic]
+    X_train_final = np.hstack((X_train_pca, vip_train))
+    X_val_final = np.hstack((X_val_pca, vip_val))
+    X_test_final = np.hstack((X_test_pca, vip_test))
+    
+    print(f"   -> 最终输入维度：PCA特征 {X_train_pca.shape[1]} 个 + VIP特征 2 个 = {X_train_final.shape[1]} 个")
+```
+*注意：在最后打包 `bundle` 时，将 `X_train_pca` 替换为 `X_train_final`（验证集和测试集同理）。*
+
+---
+
+### 策略二：将物理规则写入 Loss Function（夜间屏蔽损失）
+
+我们在之前的测试阶段使用了 `night_mask` 强制把晚上的预测变成了 0。但这只是**事后补救**。
+如果在训练时，模型在晚上预测出了 0.5 MW，MSE Loss 依然会产生梯度去更新权重。这会导致模型把宝贵的“学习精力”浪费在拟合夜晚的噪声上。
+
+**修改 `PV_part2.py` 的训练循环：**
+
+我们要自定义一个 **“掩码均方误差 (Masked MSE Loss)”**，让模型在夜晚直接“闭上眼睛”，只专注于白天的功率拟合。
+
+在定义 `criterion` 的地方（约 75 行），替换为：
+
+```python
+    # criterion = nn.MSELoss() 
+    # 自定义一个简单的 Masked MSE 函数替代官方的 criterion
+    def masked_mse_loss(preds, trues):
+        # 如果真实的功率极小 (例如小于 0.1MW，认为是夜晚)
+        # 产生一个由 0 和 1 组成的掩码张量
+        mask = (trues > 0.1).float()
+        
+        # 计算基础的平方误差
+        squared_error = (preds.squeeze(-1) - trues) ** 2
+        
+        # 将误差乘以掩码，夜晚的误差直接清零
+        masked_error = squared_error * mask
+        
+        # 只计算白天的平均误差 (防止分母过大)
+        # 加上 1e-5 防止全黑夜的 batch 导致除以 0
+        return masked_error.sum() / (mask.sum() + 1e-5)
+```
+
+然后在训练循环中调用它：
+```python
+            # 前向传播
+            pred = model(seq_x, seq_x_mark, dec_x, dec_x_mark)
+
+            # ❌ loss = criterion(pred.squeeze(-1), target_y)
+            # ✅ 使用注入了物理常识的 Loss
+            loss = masked_mse_loss(pred, target_y)
+```
+
+---
+
+### 策略三：释放 Informer 的 ProbSparse 注意力机制
+
+官方的 Informer 库中，有一个极其关键的参数被我们忽略了：**`factor`**。
+它控制了概率稀疏注意力机制（ProbSparse Attention）的采样比例。默认值通常是 5。
+如果现在的 `seq_len` 是 192（较短），采样可能会导致一些关键的天气突变点被漏掉。
+
+**修改 `model_architecture.py`：**
+
+在实例化 `Informer` 的内部，将 `factor` 调低，或者稍微增加注意力头的冗余：
+
+```python
+        self.informer = Informer(
+            # ...
+            seq_len=seq_len,
+            label_len=label_len,
+            pred_len=pred_len,
+            factor=3,             # ⭐️ 从默认的 5 降到 3，让模型计算更多点的注意力，减少遗漏
+            d_model=d_model,
+            n_heads=n_heads,
+            # ...
+        )
+```
+
+### 预期
+
+这三板斧劈下去（特别是 VIP 特征通道和 Masked Loss）：
+1. 模型在白天的敏感度将大幅提升（响应非线性的辐照度变化）。
+2. 训练速度会变快，且由于屏蔽了夜间噪声，Loss 曲线会下降得极其平滑。
+
 
 ---
 ## 🎯 推荐的优化路径
@@ -405,5 +520,5 @@ python nrbo_tuner.py        # NRBO自动调优
 ---
 
 
-**最后更新**: 2026-04-18  
+**最后更新**: 2026-04-23  
 **维护者**: Kai0809v
