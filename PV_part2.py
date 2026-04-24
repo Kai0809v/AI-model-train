@@ -95,12 +95,15 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
         dropout=0.15      # 加大随机失活率
     ).to(device)
 
-    #  ~~抛弃容易被极端天气带偏的 MSE~~ 既然解决了过拟合问题，现在再使用 MSE
+    # 既然解决了过拟合问题,现在再使用 MSE
     criterion = nn.MSELoss()
-
-    #  启用 Huber Loss
-    # delta 参数控制了从 MSE 转变为 MAE 的临界点，可以后续用 NRBO 调优这个值
-    # criterion = nn.HuberLoss(delta=0.1)
+    
+    # ❌ 动态加权 MSE 实验失败：归一化空间中权重差异过大（16-21 倍），导致梯度不平衡
+    # def weighted_mse_loss(preds, trues):
+    #     weights = 0.1 + torch.abs(trues)
+    #     squared_error = (preds.squeeze(-1) - trues) ** 2
+    #     weighted_error = squared_error * weights
+    #     return weighted_error.mean()
 
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-3)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
@@ -128,7 +131,7 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
             # 前向传播 (将四种输入完整喂给真正的 Informer)
             pred = model(seq_x, seq_x_mark, dec_x, dec_x_mark)
 
-            # 计算损失 (只计算预测长度 pred_len 部分的 MSE)
+            # 计算损失 (使用标准 MSE)
             loss = criterion(pred.squeeze(-1), target_y)
             epoch_train_loss.append(loss.item())
 
@@ -223,13 +226,19 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
         print(f"   {k}: {v:.4f}")
 
     # ==========================================
-    # 8. 可视化预测结果 (抽取第一个样本的连续 24 小时预测)
+    # 8. 可视化预测结果 (自动寻找白天有功率的样本)
     # ==========================================
+    # 寻找一个白天样本：计算每个样本未来 24 步的总功率，选取总和最高的一个
+    sample_power_sums = trues_inverse.sum(axis=1)
+    best_sample_idx = np.argmax(sample_power_sums)  # 选取发电量最大的样本
+    
+    print(f"\n 正在可视化样本索引: {best_sample_idx} (未来 24 步总功率: {sample_power_sums[best_sample_idx]:.2f} MW)")
+    
     plt.figure(figsize=(12, 5))
-    plt.plot(trues_inverse[0, :], label='Ground Truth (Real Power)', color='blue', marker='o')
-    plt.plot(preds_inverse[0, :], label='TCN-Informer Prediction', color='red', linestyle='--', marker='x')
-    plt.title('PV Power Forecasting (24 Steps into the Future)')
-    plt.xlabel('Future Time Steps')
+    plt.plot(trues_inverse[best_sample_idx, :], label=f'Ground Truth (Sample {best_sample_idx})', color='blue', marker='o')
+    plt.plot(preds_inverse[best_sample_idx, :], label='TCN-Informer Prediction', color='red', linestyle='--', marker='x')
+    plt.title(f'PV Power Forecasting (Sample {best_sample_idx}, Total Power: {sample_power_sums[best_sample_idx]:.2f} MW)')
+    plt.xlabel('Future Time Steps (15 min/step)')
     plt.ylabel('Power (MW)')
     plt.legend()
     plt.grid(True)

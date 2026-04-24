@@ -26,16 +26,43 @@ scheduler=CosineAnnealingLR
 
 ## ❌ 已验证的失败方向
 
-### 失败案例 #4：功率滞后特征导致数据泄露 ⚠️ 严重
+### 失败案例 #4：功率滞后特征导致数据泄露 ⚠️ 严重  因为先计算了滞后特征，再划分的。见git V0.7
 
 **尝试配置**：
 ```python
 # 在 PV_part1.py 中添加
 for lag_steps in [4, 12, 24]:
-    df[f'Power_lag_{lag_hours}h'] = df['Power'].shift(lag_steps)
-
+    # === 特征工程优化 1: 滞后特征 ===
+    # 过去 1h (4步), 3h (12步), 6h (24步) 的功率值
+    for lag_steps in [4, 12, 24]:
+        lag_hours = lag_steps // 4
+        df[f'Power_lag_{lag_hours}h'] = df['Power'].shift(lag_steps)
+    
+    # === 特征工程优化 2: 滚动统计量 ===
+    # 过去 24小时 (96步) 的均值和标准差
+    rolling_window = 96  # 24小时 * 4个15分钟
+    df['Power_rolling_mean_24h'] = df['Power'].rolling(window=rolling_window, min_periods=1).mean()
+    df['Power_rolling_std_24h'] = df['Power'].rolling(window=rolling_window, min_periods=1).std()
+    
+    # 过去 6小时 (24步) 的均值
+    rolling_window_6h = 24
+    df['Power_rolling_mean_6h'] = df['Power'].rolling(window=rolling_window_6h, min_periods=1).mean()
+    
 df['Power_rolling_mean_24h'] = df['Power'].rolling(96).mean()
 df['Power_rolling_std_24h'] = df['Power'].rolling(96).std()
+
+# 中间省略部分代码，详情见git V0.7的代码
+    print("3. 执行 8:1:1 时序划分...")
+    n = len(df)
+    train_end = int(n * 0.8)
+    val_end = int(n * 0.9)
+# ……
+    X_train, y_train = X[:train_end], y[:train_end]
+    X_val, y_val = X[train_end:val_end], y[train_end:val_end]
+    X_test, y_test = X[val_end:], y[val_end:]
+
+    print("4. 标准化处理 (基于训练集拟合)...")
+# ……
 ```
 
 **结果**：
