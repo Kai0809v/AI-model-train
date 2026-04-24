@@ -65,7 +65,14 @@ def run_feature_optimization_pipeline(input_path, output_dir="processed_data"):
     
     # 温度平方项（非线性效应）
     df['Temp_squared'] = df['Temp'] ** 2
-    
+
+    # 查阅资料得知，光伏板的实际转换效率会随着温度升高而线性下降
+    # 假设温度衰减系数为 0.004 (即 0.4%/°C)，基准温度为 25°C
+    # 当温度高于 25°C 时，打个折扣；低于 25°C 时，甚至有微小增益
+    df['TSI_Corrected'] = df['TSI'] * (1 - 0.004 * (df['Temp'] - 25))
+    df['GHI_Corrected'] = df['GHI'] * (1 - 0.004 * (df['Temp'] - 25))
+
+
     # 填充滞后特征产生的 NaN 值（用前向填充）
     df.ffill(inplace=True)
     df.bfill(inplace=True)  # 处理开头的NaN
