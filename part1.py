@@ -189,7 +189,7 @@ def extract_features_and_targets(train_data, test_data):
         wind_power_density = 0.5 * air_density_factor * (avg_wind ** 3).flatten()
         feats.append(wind_power_density.reshape(-1, 1))
 
-        # 8. 新增：时间周期特征（15 分钟数据的日内/周内周期）
+        # 8. 时间周期特征（15 分钟数据的日内/周内周期）
         if data_index is not None:
             # 假设数据从某天的 00:00 开始
             hour_of_day = (data_index % 96) / 96 * 24  # 一天中的时刻
@@ -203,8 +203,32 @@ def extract_features_and_targets(train_data, test_data):
 
             feats.extend([time_sin, time_cos, dow_sin, dow_cos])
 
-        # 9. 【已移除】风切变指数 - 实验证明与风速 std 高度共线，导致性能下降
-        # 替代方案：风速标准差已经捕捉了垂直梯度信息
+        # 🔧 新增：功率滞后特征（显式添加关键时间点的历史功率）
+        # data的最后一列是功率
+        power_col = data[:, -1]
+        lags = [1, 2, 4, 8, 12, 24, 48]  # 滞后步数：15min, 30min, 1h, 2h, 3h, 6h, 12h
+        for lag in lags:
+            lagged = np.roll(power_col, lag)
+            # 边界处理：用第一个有效值填充
+            lagged[:lag] = power_col[lag-1] if lag > 0 else power_col[0]
+            feats.append(lagged.reshape(-1, 1))
+        
+        # 🔧 新增：功率变化率（一阶差分）- 仅使用历史信息
+        # power_diff[t] = power[t] - power[t-1]，只依赖当前和过去
+        power_diff = np.zeros_like(power_col)
+        power_diff[1:] = np.diff(power_col)  # 从第2个点开始计算差分
+        power_diff[0] = 0  # 第一个点设为0
+        feats.append(power_diff.reshape(-1, 1))
+        
+        # 🔧 新增：功率移动平均（平滑趋势）- 仅使用历史数据
+        # 使用 causal rolling mean，确保不泄露未来信息
+        for window in [4, 12, 24]:  # 1h, 3h, 6h 移动平均
+            ma = np.zeros_like(power_col)
+            for i in range(len(power_col)):
+                # 只使用 t-window+1 到 t 的历史数据
+                start_idx = max(0, i - window + 1)
+                ma[i] = np.mean(power_col[start_idx:i+1])
+            feats.append(ma.reshape(-1, 1))
 
         return np.hstack([data] + feats)
 
@@ -258,7 +282,66 @@ def normalize_data(X_train, X_test, y_train, y_test, y_test_raw):
 # 6 构造滑动窗口 (完美防泄露)
 # ============================================
 
+def build_multi_step_windows(X_all, y_clean_all, y_raw_test, window_size, split_index, horizons=[1, 4, 8, 16]):
+    """
+    为不同预测步长生成分组数据
+    
+    参数:
+        X_all: 全部特征数据 (N, features)
+        y_clean_all: 干净标签 (N, 1)
+        y_raw_test: 原始测试标签
+        window_size: 窗口大小
+        split_index: 训练/测试分割点
+        horizons: 预测步长列表
+    
+    返回:
+        datasets: dict, key为horizon, value包含train_x, train_y, test_x, test_y_clean, test_y_raw
+    """
+    datasets = {}
+    
+    for h in horizons:
+        print(f"\n构建 {h}步预测数据...")
+        train_x, train_y = [], []
+        test_x, test_y_clean, test_y_raw = [], [], []
+        
+        # 训练集：预测未来h步
+        for i in range(window_size, split_index - h + 1):
+            X_window = X_all[i - window_size:i]
+            # 关键：收集未来h步的标签
+            y_future = y_clean_all[i:i+h].flatten()  # (h,)
+            train_x.append(X_window)
+            train_y.append(y_future)
+        
+        # 测试集
+        for i in range(split_index + window_size, len(X_all) - h + 1):
+            X_window = X_all[i - window_size:i]
+            y_future_clean = y_clean_all[i:i+h].flatten()
+            y_future_raw = y_raw_test[i - split_index:i - split_index + h].flatten()
+            
+            test_x.append(X_window)
+            test_y_clean.append(y_future_clean)
+            test_y_raw.append(y_future_raw)
+        
+        datasets[h] = {
+            'train_x': torch.tensor(np.array(train_x)).float(),
+            'train_y': torch.tensor(np.array(train_y)).float(),
+            'test_x': torch.tensor(np.array(test_x)).float(),
+            'test_y_clean': torch.tensor(np.array(test_y_clean)).float(),
+            'test_y_raw': torch.tensor(np.array(test_y_raw)).float(),
+        }
+        
+        print(f"  训练集: {len(train_x)} 样本")
+        print(f"  测试集: {len(test_x)} 样本")
+        print(f"  输入形状: {train_x[0].shape}")
+        print(f"  输出形状: {train_y[0].shape}")
+    
+    return datasets
+
+
 def build_windows(X_all, y_clean_all, y_raw_test, window_size, split_index):
+    """
+    原有的单步预测数据构建（保留兼容性）
+    """
     train_x, train_y_clean = [], []
     test_x, test_y_clean, test_y_raw = [], [], []
 
@@ -290,16 +373,16 @@ if __name__ == "__main__":
     DATA_PATH = "wind_data.csv" # 每 15 分钟一个数据点
     START_INDEX = 0  # 数据起点
     DATA_SIZE = 11520
-    WINDOW_SIZE = 96
+    WINDOW_SIZE = 48
     SPLIT_RATE = 0.9
 
     # Step 1 & 2: 加载与划分
     data = load_data(DATA_PATH, DATA_SIZE,START_INDEX)
     train_data, test_data, split_index = time_series_split(data, SPLIT_RATE)
 
-    # 可视化不同 drop_k 的去噪效果，这里drop_k取1较佳
-    train_power_for_plot = train_data['实际发电功率（mw）'].values
-    visualize_drop_k_experiments(train_power_for_plot, display_length=800)
+    # 可视化不同 drop_k 的去噪效果，这里drop_k取1较佳，下次需要时再取消注释
+    # train_power_for_plot = train_data['实际发电功率（mw）'].values
+    # visualize_drop_k_experiments(train_power_for_plot, display_length=800)
 
     # Step 3 & 4: 提取特征与目标去噪
     X_train, X_test, y_train_clean, y_test_clean, y_test_raw = extract_features_and_targets(train_data, test_data)
@@ -313,6 +396,18 @@ if __name__ == "__main__":
     X_all = np.vstack((X_train_s, X_test_s))
     y_clean_all = np.vstack((y_train_s, y_test_s))
 
+    # 🔧 新增：构建多步预测数据
+    print("\n=== 构建多步预测数据集 ===")
+    multi_step_datasets = build_multi_step_windows(
+        X_all, y_clean_all, y_test_raw_s, WINDOW_SIZE, split_index,
+        horizons=[1, 4, 8]
+    )
+    
+    # 保存多步数据集
+    dump(multi_step_datasets, "multi_step_datasets.pkl")
+    print("\n[+] 已保存: multi_step_datasets.pkl")
+    
+    # 保留原有的单步数据（兼容性）
     train_set, train_label_clean, test_set, test_label_clean, test_label_raw = build_windows(
         X_all, y_clean_all, y_test_raw_s, WINDOW_SIZE, split_index
     )
@@ -328,3 +423,53 @@ if __name__ == "__main__":
     print("\n🎉 数据处理与保存完成！")
     print("模型输入 X 形状:", train_set.shape)
     print("干净目标 Y 形状:", train_label_clean.shape)
+    """
+    数据尺寸: (11520, 15) 
+    数据起点: 0
+    训练集尺寸: (10368, 15)
+    测试集尺寸: (1152, 15)
+
+    正在进行 CEEMDAN 分解用于可视化测试 (取前 800 个点)...
+    该片段共分解出 9 个 IMF 分量。
+    衍生特征构建完毕，最终特征维度: 40
+
+    --- 训练集目标去噪 ---
+    开始对目标功率进行 CEEMDAN 分解提纯...
+    共分解出 13 个 IMF 分量（含残差）。
+
+    --- 测试集目标去噪 ---
+    开始对目标功率进行 CEEMDAN 分解提纯...
+    共分解出 8 个 IMF 分量（含残差）。
+
+    === 构建多步预测数据集 ===
+
+    构建 1步预测数据...
+      训练集: 10320 样本
+      测试集: 1104 样本
+      输入形状: (48, 40)
+      输出形状: (1,)
+
+    构建 4步预测数据...
+      训练集: 10317 样本
+      测试集: 1101 样本
+      输入形状: (48, 40)
+      输出形状: (4,)
+
+    构建 8步预测数据...
+      训练集: 10313 样本
+      测试集: 1097 样本
+      输入形状: (48, 40)
+      输出形状: (8,)
+
+    构建 16步预测数据...
+      训练集: 10305 样本
+      测试集: 1089 样本
+      输入形状: (48, 40)
+      输出形状: (16,)
+
+    [+] 已保存: multi_step_datasets.pkl
+
+    🎉 数据处理与保存完成！
+    模型输入 X 形状: torch.Size([10320, 48, 40])
+    干净目标 Y 形状: torch.Size([10320, 1])
+    """

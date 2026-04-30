@@ -243,46 +243,141 @@ for epoch in range(epochs):
 model.load_state_dict(torch.load("transformer_weights_best.pth"))
 
 # ============================================
-# 6 测试与反归一化 (直接对抗真实环境噪声)
+# 6 测试与反归一化 (滚动预测未来48步)
 # ============================================
 
+def multi_step_forecast(model, initial_input, horizon=48, device='cuda'):
+    """
+    滚动预测未来多个时间步
+    
+    参数:
+        model: 训练好的Transformer模型
+        initial_input: 初始输入序列 (1, window_size, feature_dim)
+        horizon: 预测 horizon 步数
+        device: 设备
+    
+    返回:
+        predictions: 预测值列表 (horizon,)
+    """
+    model.eval()
+    predictions = []
+    
+    # 复制初始输入，避免修改原始数据
+    current_input = initial_input.clone().to(device)
+    
+    with torch.no_grad():
+        for step in range(horizon):
+            # 单步预测
+            pred = model(current_input)  # (1, 1)
+            pred_value = pred.cpu().numpy()[0, 0]
+            predictions.append(pred_value)
+            
+            # 滚动更新：将预测值加入序列末尾，移除最前面的值
+            # current_input shape: (1, window_size, feature_dim)
+            # 假设最后一列是目标变量(功率)
+            
+            # 获取除最后一列外的所有特征
+            feature_cols = current_input[:, :-1, :]  # (1, window_size, feature_dim-1)
+            
+            # 将预测值作为新的目标值（添加到末尾）
+            new_target = torch.tensor([[pred_value]], dtype=torch.float32).to(device)
+            
+            # 滚动更新特征（这里简化处理：平移并添加预测值）
+            # 实际应用中可能需要更复杂的特征更新策略
+            rolled_input = torch.roll(current_input, shifts=-1, dims=1)
+            rolled_input[:, -1, -1] = new_target.squeeze()
+            
+            current_input = rolled_input
+    
+    return np.array(predictions)
+
+
+# 获取测试集最后一个窗口作为初始输入
+print("\n开始滚动预测未来48步...")
+
+# 取测试集最后一个样本（最新的48步数据）
+last_window = test_set_selected[-1: :, :, :]  # (1, 48, n_features)
+print(f"初始输入形状: {last_window.shape}")
+
+# 滚动预测48步
+pred_48steps_scaled = multi_step_forecast(model, last_window, horizon=48, device=device)
+pred_48steps_scaled = pred_48steps_scaled.reshape(-1, 1)
+
+# 对比：原有单步预测结果
+model.eval()
+with torch.no_grad():
+    pred_single_scaled = model(last_window.to(device)).cpu().numpy()
+
+# 反归一化
+pred_48steps_real = scaler_y.inverse_transform(pred_48steps_scaled)
+pred_single_real = scaler_y.inverse_transform(pred_single_scaled)
+
+# 获取对应的真实值（测试集最后48个时间步）
+true_raw_last48 = scaler_y.inverse_transform(test_label_raw[-48:])
+true_clean_last48 = scaler_y.inverse_transform(test_label_clean[-48:])
+
+print(f"48步预测形状: {pred_48steps_real.shape}")
+print(f"单步预测形状: {pred_single_real.shape}")
+print(f"真实值形状: {true_raw_last48.shape}")
+
+# 同时保留原有的全测试集预测结果（用于评估整体性能）
 model.eval()
 pred_list = []
 
 with torch.no_grad():
-    for x, _ in test_loader:  # 最终测试使用 Raw Label
+    for x, _ in test_loader:
         x = x.to(device)
         pred = model(x)
         pred_list.append(pred.cpu().numpy())
 
 pred_scaled = np.vstack(pred_list)
-
-# 反归一化
 pred_real = scaler_y.inverse_transform(pred_scaled)
 true_raw_real = scaler_y.inverse_transform(test_label_raw.numpy())
 true_clean_real = scaler_y.inverse_transform(test_label_clean.numpy())
 
 # ============================================
-# 7 评估指标 (核心：计算真实世界的误差)
+# 7 评估指标
 # ============================================
 
+# 7.1 全测试集单步预测评估
 rmse = np.sqrt(mean_squared_error(true_raw_real, pred_real))
 mae = mean_absolute_error(true_raw_real, pred_real)
 r2 = r2_score(true_raw_real, pred_real)
 
-print("\n--- 最终工业级评估结果 (对抗真实高频噪声) ---")
+print("\n--- 全测试集单步预测评估 ---")
 print(f"RMSE: {rmse:.4f} MW")
 print(f"MAE : {mae:.4f} MW")
 print(f"R2  : {r2:.4f}")
+
+# 7.2 未来48步滚动预测评估
+rmse_48 = np.sqrt(mean_squared_error(true_raw_last48, pred_48steps_real))
+mae_48 = mean_absolute_error(true_raw_last48, pred_48steps_real)
+r2_48 = r2_score(true_raw_last48, pred_48steps_real)
+
+print("\n--- 未来48步滚动预测评估 (Horizon=48) ---")
+print(f"RMSE: {rmse_48:.4f} MW")
+print(f"MAE : {mae_48:.4f} MW")
+print(f"R2  : {r2_48:.4f}")
+
+# 7.3 对比：全测试集单步预测在最后48步的表现（以最后48步为基准）
+pred_single_last48 = pred_real[-48:]
+rmse_single_48 = np.sqrt(mean_squared_error(true_raw_last48, pred_single_last48))
+mae_single_48 = mean_absolute_error(true_raw_last48, pred_single_last48)
+r2_single_48 = r2_score(true_raw_last48, pred_single_last48)
+
+print("\n--- 单步预测在最后48步的表现 (对比基准) ---")
+print(f"RMSE: {rmse_single_48:.4f} MW")
+print(f"MAE : {mae_single_48:.4f} MW")
+print(f"R2  : {r2_single_48:.4f}")
 
 # ============================================
 # 8 可视化：损失曲线与预测拟合度
 # ============================================
 
-plt.figure(figsize=(18, 6))
+plt.figure(figsize=(20, 12))
 
 # 图 1：训练&验证损失曲线
-plt.subplot(1, 3, 1)
+plt.subplot(2, 3, 1)
 plt.plot(range(1, len(train_losses) + 1), train_losses, marker='o', linestyle='-', color='b', label='Train')
 plt.plot(range(1, len(val_losses) + 1), val_losses, marker='s', linestyle='--', color='orange', label='Val (Clean)')
 plt.title("Training & Validation Loss Curve")
@@ -291,20 +386,20 @@ plt.ylabel("MSE Loss")
 plt.legend()
 plt.grid(True, linestyle='--', alpha=0.6)
 
-# 图 2：预测曲线对比
-plt.subplot(1, 3, 2)
+# 图 2：预测曲线对比（全测试集）
+plt.subplot(2, 3, 2)
 plot_len = 200
 plt.plot(true_raw_real[:plot_len], label="True Raw Power (Noisy)", color='gray', alpha=0.5, linewidth=1)
 plt.plot(true_clean_real[:plot_len], label="True Clean Power (Target)", color='green', linestyle='--', linewidth=2)
 plt.plot(pred_real[:plot_len], label="Model Prediction", color='red', linewidth=2)
-plt.title("Wind Power Prediction (First 200 Hours)")
+plt.title("Wind Power Prediction - Full Test Set (First 200)")
 plt.xlabel("Time Step")
 plt.ylabel("Power (MW)")
 plt.legend()
 plt.grid(True, linestyle='--', alpha=0.6)
 
 # 图 3：预测 vs 真实散点图
-plt.subplot(1, 3, 3)
+plt.subplot(2, 3, 3)
 plt.scatter(true_raw_real[::10], pred_real[::10], alpha=0.5, s=20, c='blue', label='Samples')
 plt.plot([true_raw_real.min(), true_raw_real.max()],
          [true_raw_real.min(), true_raw_real.max()],
@@ -313,6 +408,43 @@ plt.title("Prediction vs True (Scatter)")
 plt.xlabel("True Power (MW)")
 plt.ylabel("Predicted Power (MW)")
 plt.legend()
+plt.grid(True, linestyle='--', alpha=0.6)
+
+# 图 4：未来48步滚动预测曲线
+plt.subplot(2, 3, 4)
+timesteps = np.arange(48)
+plt.plot(timesteps, true_raw_last48, label="True Raw Power", color='gray', alpha=0.6, linewidth=2)
+plt.plot(timesteps, true_clean_last48, label="True Clean Power", color='green', linestyle='--', linewidth=2)
+plt.plot(timesteps, pred_48steps_real, label="48-Step Rolling Forecast", color='red', linewidth=2, marker='o', markersize=3)
+plt.plot(timesteps, pred_single_last48, label="Single-Step Prediction", color='blue', linestyle=':', linewidth=2)
+plt.title("Future 48-Step Rolling Forecast")
+plt.xlabel("Forecast Horizon (15min steps)")
+plt.ylabel("Power (MW)")
+plt.legend()
+plt.grid(True, linestyle='--', alpha=0.6)
+
+# 图 5：48步预测误差分布
+plt.subplot(2, 3, 5)
+error_48 = (pred_48steps_real.flatten() - true_raw_last48.flatten())
+plt.hist(error_48, bins=20, color='steelblue', edgecolor='black', alpha=0.7)
+plt.axvline(x=0, color='red', linestyle='--', linewidth=2)
+plt.title(f"48-Step Forecast Error Distribution\nMAE: {mae_48:.2f} MW")
+plt.xlabel("Error (MW)")
+plt.ylabel("Frequency")
+plt.grid(True, linestyle='--', alpha=0.6)
+
+# 图 6：累积预测误差随 horizon 变化
+plt.subplot(2, 3, 6)
+cumulative_mae = []
+running_pred = []
+for i in range(1, 49):
+    # 重新计算前i步的累积误差
+    cumulative_mae.append(np.mean(np.abs(pred_48steps_real[:i].flatten() - true_raw_last48[:i].flatten())))
+
+plt.plot(range(1, 49), cumulative_mae, marker='o', markersize=4, color='purple', linewidth=2)
+plt.title("Cumulative MAE vs Forecast Horizon")
+plt.xlabel("Horizon Step")
+plt.ylabel("Cumulative MAE (MW)")
 plt.grid(True, linestyle='--', alpha=0.6)
 
 plt.tight_layout()

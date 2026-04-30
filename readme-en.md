@@ -92,12 +92,13 @@ Operation Steps:
 4. Click **Start Intelligent Prediction** and view visual results
 
 ### Method 2: Call API Interface (For Developers)
+
 ```python
 from api_v5 import ForecastService
 import pandas as pd
 
 # Initialize prediction service
-service = ForecastService(base_models_dir="pretrained")
+service = ForecastService(base_models_dir="assets")
 
 # Load data
 df = pd.read_csv("your_data.csv")
@@ -194,9 +195,9 @@ early_stop_patience = 15  # Early stopping patience
 Core performance on real noisy datasets:
 | Metric | Value | Description |
 |------|------|------|
-| RMSE | 10.28 MW | Root Mean Square Error |
-| MAE | 6.68 MW | Mean Absolute Error |
-| R² | 0.9709 | R-squared (higher = more accurate) |
+| RMSE | 6.2446 MW | Root Mean Square Error |
+| MAE | 3.67633 MW | Mean Absolute Error |
+| R² | 0.9848 | R-squared (higher = more accurate) |
 
 - After CEEMDAN denoising, R² is improved by 5.4% compared with non-denoised baseline
 - Physical rule verification ensures low-wind/negative power predictions conform to reality

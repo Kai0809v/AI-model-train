@@ -16,4 +16,10 @@
 /测试数据短切片.csv
 /测试数据后续功率抬升.csv
 /后续低功率切片.csv
+/part2_multi_horizon_v7_window_tuned.py
 /lgb_feature_selector.joblib
+/assets/wind_ceemdan_lgbm_trans/transformer_weights_singlelearn.pth
+/assets/wind_ceemdan_lgbm_trans/scaler_x
+/assets/wind_ceemdan_lgbm_trans/selected_features_indices.npy
+/assets/wind_ceemdan_lgbm_trans/transformer_weights_single_minmax.pth
+/assets/wind_ceemdan_lgbm_trans/scaler_y

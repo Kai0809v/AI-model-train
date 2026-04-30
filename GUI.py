@@ -1,14 +1,12 @@
 import sys
+
 import pandas as pd
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QLabel, QComboBox, QPushButton,
                                QLineEdit, QFileDialog, QTextEdit, QFrame,
-                               QProgressBar, QMessageBox, QStackedWidget,
-                               QGridLayout, QSpacerItem, QSizePolicy)
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QPixmap, QIcon
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
+                               QProgressBar, QMessageBox, QStackedWidget)
 
 # 导入预测服务接口
 from api_v5 import ForecastService
@@ -539,8 +537,7 @@ class EnergyForecastApp(QMainWindow):
         self.steps_combo.addItems([
             "下一时刻（单步）",
             "一小时（4 步）",
-            "两小时（8 步）",
-            "四小时（16 步）"
+            "两小时（8 步）"
         ])
         style_combo(self.steps_combo)
         left_layout.addWidget(self.steps_combo)
@@ -667,7 +664,7 @@ class EnergyForecastApp(QMainWindow):
         display_model = self.model_combo.currentText()
         backend_model_name = self.model_map.get(display_model)
         
-        # 🔧 修改：根据新的选项映射步数
+        # 🔧 修改：根据新的选项映射步数（仅支持1, 4, 8步）
         steps_text = self.steps_combo.currentText()
         if "单步" in steps_text:
             steps = 1
@@ -675,10 +672,10 @@ class EnergyForecastApp(QMainWindow):
             steps = 4
         elif "8 步" in steps_text:
             steps = 8
-        elif "16 步" in steps_text:
-            steps = 16
         else:
+            # 默认使用单步
             steps = 1
+            self.append_log("⚠️ 未知步长选项，默认使用单步预测")
 
         self.start_btn.setEnabled(False)
         self.start_btn.setText("⏳ 模型推理中...")
@@ -729,8 +726,6 @@ class EnergyForecastApp(QMainWindow):
                 time_desc = "未来 1 小时平均预测功率"
             elif steps == 8:
                 time_desc = "未来 2 小时平均预测功率"
-            elif steps == 16:
-                time_desc = "未来 4 小时平均预测功率"
             else:
                 time_desc = f"未来{steps}步平均预测功率"
             
@@ -748,6 +743,10 @@ class EnergyForecastApp(QMainWindow):
             # 绘制多点折线图
             self.plot_prediction(vals, f"{steps}步滚动预测序列")
             self.append_log(f"详细多步序列：{[round(v, 2) for v in vals]}")
+        
+        # 🔧 新增：记录使用的模型和步长信息
+        model_info = result.get("model_name", "未知模型")
+        self.append_log(f"✓ 预测完成 | 模型: {model_info} | 步长: {result.get('steps', 1)}")
 
         QMessageBox.information(self, "成功", "预测任务已成功完成！")
 

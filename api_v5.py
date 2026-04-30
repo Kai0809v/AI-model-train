@@ -1,16 +1,7 @@
 # ============================================
 # 统一预测接口（可直接对接 GUI）
-# v2改了算法，但是api中与训练时的特征构建逻辑不一致
+# TODO：在GUI选择有缺失的数据预测时会有报错
 # ============================================
-
-# import numpy as np
-# import pandas as pd
-# import torch
-# import torch.nn as nn
-# from joblib import load
-# from PyEMD import CEEMDAN
-# import math
-# import os
 
 import os
 import torch
@@ -19,6 +10,10 @@ import numpy as np
 import pandas as pd
 import math
 from joblib import load
+
+# 🔧 修复 PyTorch 2.6 的 weights_only 安全限制
+# 允许加载包含 numpy 标量的模型文件
+torch.serialization.add_safe_globals([np.core.multiarray.scalar])
 
 
 # ============================================
@@ -81,6 +76,49 @@ class TransformerModel(nn.Module):
         return out
 
 
+class SimpleMultiStepTransformer(nn.Module):
+    """V6集成学习版 - 支持多步预测"""
+    def __init__(self, input_dim, horizon=1):
+        super().__init__()
+        
+        self.embedding = nn.Linear(input_dim, 256)
+        self.pos_encoder = PositionalEncoding(d_model=256)
+        
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=256, nhead=8, dim_feedforward=512,
+            batch_first=True, dropout=0.1
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=4)
+        
+        self.attention_pooling = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.Tanh(),
+            nn.Linear(128, 1)
+        )
+        
+        self.fc = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, horizon)
+        )
+    
+    def forward(self, x):
+        x = self.embedding(x)
+        x = self.pos_encoder(x)
+        x = self.transformer(x)
+        
+        attention_weights = self.attention_pooling(x)
+        attention_weights = torch.softmax(attention_weights, dim=1)
+        context = torch.sum(x * attention_weights, dim=1)
+        
+        output = self.fc(context)
+        return output
+
+
 # ============================================
 # 2 专属预测器 API 封装
 # ============================================
@@ -98,14 +136,40 @@ class CEEMDAN_LGBM_Transformer_Predictor:
             self.scaler_x = load(os.path.join(model_dir, "scaler_x"))
             self.scaler_y = load(os.path.join(model_dir, "scaler_y"))
             self.selected_features = np.load(os.path.join(model_dir, "selected_features_indices.npy"))
-            weight_path = os.path.join(model_dir, "transformer_weights_single_minmax.pth")
+            
+            # 🔧 V6集成学习版：检查是否存在集成模型文件
+            ensemble_h1_path = os.path.join(model_dir, "ensemble_models_h1_v6.pth")
+            if os.path.exists(ensemble_h1_path):
+                self.use_ensemble = True
+                self.ensemble_models = {}
+                for h in [1, 4, 8]:
+                    ensemble_path = os.path.join(model_dir, f"ensemble_models_h{h}_v6.pth")
+                    if os.path.exists(ensemble_path):
+                        ensemble_package = torch.load(ensemble_path, map_location=self.device, weights_only=False)
+                        models = []
+                        for state_dict in ensemble_package['model_state_dicts']:
+                            model = SimpleMultiStepTransformer(
+                                input_dim=len(self.selected_features),
+                                horizon=h
+                            ).to(self.device)
+                            model.load_state_dict(state_dict)
+                            model.eval()
+                            models.append(model)
+                        self.ensemble_models[h] = models
+                        print(f"[+] 已加载 {h}步集成模型（{len(models)}个子模型）")
+                
+                print("[✓] 使用V6集成学习模式")
+            else:
+                # 回退到单模型模式
+                self.use_ensemble = False
+                weight_path = os.path.join(model_dir, "transformer_weights_single_minmax.pth")
+                self.model = TransformerModel(input_dim=len(self.selected_features)).to(self.device)
+                self.model.load_state_dict(torch.load(weight_path, map_location=self.device, weights_only=False))
+                self.model.eval()
+                print("[✓] 使用传统单模型模式")
+                
         except FileNotFoundError as e:
             raise FileNotFoundError(f"加载模型资产失败，请检查 {model_dir} 目录下是否缺少文件: {str(e)}")
-
-        # 2. 实例化模型并加载权重
-        self.model = TransformerModel(input_dim=len(self.selected_features)).to(self.device)
-        self.model.load_state_dict(torch.load(weight_path, map_location=self.device))
-        self.model.eval()  # 务必切换到推断模式
 
         # 预期的基础列名顺序 (需与 GUI 传入的 DataFrame 保持一致)
         self.expected_cols = [
@@ -219,6 +283,31 @@ class CEEMDAN_LGBM_Transformer_Predictor:
 
         feats.extend([time_sin, time_cos, dow_sin, dow_cos])
 
+        # 🔧 补全：功率滞后特征（与训练时 part1.py 保持一致）
+        # 基础数据的最后一列是功率
+        power_col = base_data[:, -1]
+        lags = [1, 2, 4, 8, 12, 24, 48]  # 滞后步数：15min, 30min, 1h, 2h, 3h, 6h, 12h
+        for lag in lags:
+            lagged = np.roll(power_col, lag)
+            # 边界处理：用第一个有效值填充
+            lagged[:lag] = power_col[lag-1] if lag > 0 else power_col[0]
+            feats.append(lagged.reshape(-1, 1))
+        
+        # 🔧 补全：功率变化率（一阶差分）- 仅使用历史信息
+        power_diff = np.zeros_like(power_col)
+        power_diff[1:] = np.diff(power_col)  # 从第2个点开始计算差分
+        power_diff[0] = 0  # 第一个点设为0
+        feats.append(power_diff.reshape(-1, 1))
+        
+        # 🔧 补全：功率移动平均（平滑趋势）- 仅使用历史数据
+        for window in [4, 12, 24]:  # 1h, 3h, 6h 移动平均
+            ma = np.zeros_like(power_col)
+            for i in range(len(power_col)):
+                # 只使用 t-window+1 到 t 的历史数据
+                start_idx = max(0, i - window + 1)
+                ma[i] = np.mean(power_col[start_idx:i+1])
+            feats.append(ma.reshape(-1, 1))
+
         # 拼接全部特征
         full_features = np.hstack([base_data] + feats)
 
@@ -232,8 +321,16 @@ class CEEMDAN_LGBM_Transformer_Predictor:
         tensor_x = torch.tensor(selected_features_scaled).unsqueeze(0).float()
         return tensor_x
 
-    def predict(self, df: pd.DataFrame) -> dict:
+    def predict(self, df: pd.DataFrame, steps: int = 1) -> dict:
+        """
+        统一预测接口：支持单步和多步预测
+        自动根据steps参数选择对应的集成模型
+        """
         try:
+            # 🔧 验证步长是否支持
+            if steps not in [1, 4, 8]:
+                return {"success": False, "error": f"不支持的预测步长：{steps}。仅支持 [1, 4, 8]"}
+            
             # 🔧 第一道防线：检查并处理 NaN 值
             if df.isnull().any().any():
                 print(f"⚠️ predict() 检测到 NaN 值，将尝试修复...")
@@ -249,107 +346,141 @@ class CEEMDAN_LGBM_Transformer_Predictor:
                         df[col].fillna(df[col].mean(), inplace=True)
 
             # 1. 提取当前这一步的真实原始风速 (未归一化的原始 df)
-            # 假设你的列名是 '测风塔50m风速(m/s)' 等，这里取轮毂高度风速或多层平均
             current_wind_speed = df['轮毂高度风速(m/s)'].iloc[-1]
 
             # 💡 物理规则拦截：如果风速小于 3.0 m/s，直接锁死为 0
-            if current_wind_speed < 3.0:  # 这个 3.0 请根据你风电场的实际切入风速调整
-                return {
-                    "success": True,
-                    "prediction": 0.0,
-                    "model_name": "CEEMDAN_LGBM_Transformer",
-                    "note": "Blocked by Cut-in Wind Speed threshold"
-                }
+            if current_wind_speed < 3.0:
+                predictions = [0.0] * steps
+                if steps == 1:
+                    return {
+                        "success": True,
+                        "prediction": 0.0,
+                        "model_name": "CEEMDAN_LGBM_Transformer",
+                        "note": "Blocked by Cut-in Wind Speed threshold"
+                    }
+                else:
+                    return {
+                        "success": True,
+                        "predictions": predictions,
+                        "steps": steps,
+                        "note": "Blocked by Cut-in Wind Speed threshold"
+                    }
 
             # 2. 正常经过深度学习网络预测
             tensor_x = self._preprocess(df).to(self.device)
-            with torch.no_grad():
-                pred_scaled = self.model(tensor_x)
+            
+            if self.use_ensemble:
+                # 🔧 V6集成学习模式：使用对应步长的集成模型
+                models = self.ensemble_models[steps]
+                all_preds = []
+                with torch.no_grad():
+                    for model in models:
+                        pred = model(tensor_x)
+                        all_preds.append(pred.cpu().numpy())
+                
+                # 取平均：形状 (1, steps)
+                pred_scaled = np.mean(all_preds, axis=0)
+            else:
+                # 传统单模型模式：仅支持1步
+                if steps != 1:
+                    return {"success": False, "error": "传统单模型模式仅支持1步预测"}
+                with torch.no_grad():
+                    pred_scaled = self.model(tensor_x).cpu().numpy()
 
-            pred_real = self.scaler_y.inverse_transform(pred_scaled.cpu().numpy())
-
-            # 💡 第二道防线：如果模型预测出负数，强行置 0
-            final_pred = float(pred_real[0][0])
-            if final_pred < 0:
-                final_pred = 0.0
-
-            return {
-                "success": True,
-                "prediction": final_pred,
-                "model_name": "CEEMDAN_LGBM_Transformer"
-            }
+            # 反归一化每一列
+            if steps == 1:
+                pred_real = self.scaler_y.inverse_transform(pred_scaled)
+                final_pred = float(pred_real[0][0])
+                
+                # 💡 第二道防线：如果模型预测出负数，强行置 0
+                if final_pred < 0:
+                    final_pred = 0.0
+                
+                return {
+                    "success": True,
+                    "prediction": final_pred,
+                    "model_name": "CEEMDAN_LGBM_Transformer"
+                }
+            else:
+                # 多步预测：逐列反归一化
+                pred_real = np.zeros_like(pred_scaled)
+                for col in range(steps):
+                    pred_real[:, col] = self.scaler_y.inverse_transform(
+                        pred_scaled[:, col:col+1]
+                    ).flatten()
+                
+                # 负功率修正
+                predictions = pred_real[0].tolist()
+                predictions = [max(0.0, p) for p in predictions]
+                
+                return {
+                    "success": True,
+                    "predictions": predictions,
+                    "steps": steps
+                }
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     def predict_multi(self, df: pd.DataFrame, steps: int) -> dict:
         """
-        多步自回归预测：滚动预测未来多步
-        注意：实际业务中多步预测最好使用未来的气象预报(NWP)数据。
-        如果这里 GUI 只传入了历史数据，则采用最简单的自回归(特征平移)进行滚动。
+        多步预测：直接使用对应的集成模型（非自回归）
+        支持 1步、4步、8步
         """
         try:
-            predictions = []
-            # 复制一份用于滚动更新的内部 df
-            current_df = df.copy()
+            # 🔧 验证步长是否支持
+            if steps not in [1, 4, 8]:
+                return {"success": False, "error": f"不支持的预测步长：{steps}。仅支持 [1, 4, 8]"}
             
-            # 🔧 预先检查并修复 NaN 值
-            if current_df.isnull().any().any():
+            # 预处理数据
+            if df.isnull().any().any():
                 print(f"⚠️ predict_multi() 检测到 NaN 值，正在预处理...")
-                critical_cols = [col for col in self.expected_cols if col in current_df.columns]
-                current_df[critical_cols] = current_df[critical_cols].fillna(method='ffill').fillna(method='bfill')
+                df = df.copy()
+                critical_cols = [col for col in self.expected_cols if col in df.columns]
+                df[critical_cols] = df[critical_cols].fillna(method='ffill').fillna(method='bfill')
                 for col in critical_cols:
-                    if current_df[col].isnull().any():
-                        current_df[col].fillna(current_df[col].mean(), inplace=True)
+                    if df[col].isnull().any():
+                        df[col].fillna(df[col].mean(), inplace=True)
 
-            for step in range(steps):
-                # ==========================================
-                # 💡 第一道物理防线：切入风速拦截
-                # ==========================================
-                # 提取当前时刻的风速，低于 3.0 m/s 直接判定为不发电
-                current_wind_speed = current_df['轮毂高度风速(m/s)'].iloc[-1]
+            # 检查风速条件
+            current_wind_speed = df['轮毂高度风速(m/s)'].iloc[-1]
+            if current_wind_speed < 3.0:
+                # 风速过低，所有步长都返回0
+                predictions = [0.0] * steps
+                return {
+                    "success": True,
+                    "predictions": predictions,
+                    "steps": steps,
+                    "note": "Blocked by Cut-in Wind Speed threshold"
+                }
 
-                if current_wind_speed < 3.0:
-                    step_pred_value = 0.0
-                else:
-                    # 1. 正常经过深度学习网络预测当前步
-                    tensor_x = self._preprocess(current_df).to(self.device)
-                    with torch.no_grad():
-                        pred_scaled = self.model(tensor_x)
-                    pred_real = self.scaler_y.inverse_transform(pred_scaled.cpu().numpy())
-                    step_pred_value = float(pred_real[0][0])
+            # 准备输入
+            tensor_x = self._preprocess(df).to(self.device)
+            
+            if self.use_ensemble:
+                # 🔧 V6集成学习模式：使用对应步长的集成模型
+                models = self.ensemble_models[steps]
+                all_preds = []
+                with torch.no_grad():
+                    for model in models:
+                        pred = model(tensor_x)
+                        all_preds.append(pred.cpu().numpy())
+                
+                # 取平均：形状 (1, steps)
+                pred_scaled = np.mean(all_preds, axis=0)
+            else:
+                # 传统模式：不支持多步（理论上不会走到这里）
+                return {"success": False, "error": "传统单模型模式不支持多步预测"}
 
-                    # ==========================================
-                    # 💡 第二道物理防线：负功率修正
-                    # ==========================================
-                    if step_pred_value < 0:
-                        step_pred_value = 0.0
+            # 反归一化每一列
+            pred_real = np.zeros_like(pred_scaled)
+            for col in range(steps):
+                pred_real[:, col] = self.scaler_y.inverse_transform(
+                    pred_scaled[:, col:col+1]
+                ).flatten()
 
-                predictions.append(step_pred_value)
-
-                # 2. 构造虚拟的下一步数据 (自回归填补)
-                last_row = current_df.iloc[-1:].copy()
-
-                # 🔧 修复：显式转换索引类型并计算新时间戳
-                if isinstance(current_df.index, pd.DatetimeIndex):
-                    # 如果是 DatetimeIndex，计算下一个时间点
-                    last_timestamp = current_df.index[-1]
-                    new_timestamp = last_timestamp + pd.Timedelta(minutes=15)
-
-                    # 创建新的单行 DataFrame
-                    new_row_dict = last_row.to_dict('records')[0]
-                    new_row_dict['实际发电功率（mw）'] = step_pred_value
-
-                    # 使用新索引创建 Series 然后转为 DataFrame
-                    new_row = pd.DataFrame([new_row_dict], index=[new_timestamp])
-                else:
-                    # 如果没有 DatetimeIndex，使用整数索引
-                    new_index = current_df.index[-1] + 1
-                    new_row_dict = last_row.to_dict('records')[0]
-                    new_row_dict['实际发电功率（mw）'] = step_pred_value
-                    new_row = pd.DataFrame([new_row_dict], index=[new_index])
-
-                # 将新行拼接到数据框
-                current_df = pd.concat([current_df, new_row], axis=0)
+            # 负功率修正
+            predictions = pred_real[0].tolist()
+            predictions = [max(0.0, p) for p in predictions]
 
             return {
                 "success": True,
@@ -383,7 +514,7 @@ class LSTM_Predictor:
 # 3. 统一调度器（支持多模型动态扩展）
 # ============================================
 class ForecastService:
-    def __init__(self, base_models_dir="pretrained"):
+    def __init__(self, base_models_dir="assets"):
         # ★ 动态获取当前脚本所在的绝对路径，并拼接出总的仓库文件夹
         BASE_DIR = os.path.dirname(os.path.abspath(__file__))
         self.base_models_dir = os.path.join(BASE_DIR, base_models_dir)
@@ -420,14 +551,19 @@ class ForecastService:
         return self._loaded_models[model_name]
 
     def run(self, model_name, df, steps=1):
+        """
+        统一调度接口
+        :param model_name: 模型名称
+        :param df: 输入数据DataFrame
+        :param steps: 预测步长 (1, 4, 8)
+        :return: 预测结果字典
+        """
         try:
             # 自动获取已初始化的专属模型实例
             model = self._get_model(model_name)
 
-            if steps == 1:
-                return model.predict(df)
-            else:
-                return model.predict_multi(df, steps)
+            # 🔧 统一调用predict方法，传入steps参数
+            return model.predict(df, steps=steps)
 
         except Exception as e:
             return {"success": False, "error": str(e)}

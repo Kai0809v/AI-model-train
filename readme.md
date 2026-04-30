@@ -291,7 +291,7 @@ python part2_stable.py
 - 训练模型（Adam 优化器，初始 lr=0.0005）
 - 早停机制（patience=15）+ ReduceLROnPlateau 调度
 - 在测试集上评估 RMSE、MAE、R²
-- 保存最佳模型权重到 `pretrained/wind_ceemdan_lgbm_trans/`
+- 保存最佳模型权重到 `assets/wind_ceemdan_lgbm_trans/`
 
 **训练耗时**：
 - CPU: 约 30-60 分钟
@@ -320,9 +320,9 @@ early_stop_patience = 15  # 早停耐心值
 
 | 指标 | 数值 | 说明 |
 |------|------|------|
-| **RMSE** | 10.28 MW | 均方根误差 |
-| **MAE** | 6.68 MW | 平均绝对误差 |
-| **R²** | 0.9709 | 决定系数（越接近 1 越好） |
+| **RMSE** | 6.2446 MW | 均方根误差 |
+| **MAE** | 3.67633 MW | 平均绝对误差 |
+| **R²** | 0.9848 | 决定系数（越接近 1 越好） |
 
 ### 对比实验
 - **未去噪 baseline**：R² ≈ 0.92
