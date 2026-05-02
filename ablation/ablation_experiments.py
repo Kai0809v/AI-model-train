@@ -16,16 +16,23 @@ from model_architecture import (
     True_TCN_Informer, BaselineFCModel, 
     InformerOnlyModel, TCN_LinearModel
 )
-from PV_part1_for_ab import run_feature_optimization_pipeline, run_without_bp_pipeline
+from PV_part1_for_ab import run_feature_optimization_pipeline, run_feature_optimization_pipeline_base, run_without_bp_pipeline
 
 
-PKL_WITH_BP = "../processed_data/model_ready_data.pkl"
+PKL_BP_FULL = "../processed_data/model_ready_data.pkl"
+PKL_BP_BASE = "../processed_data/model_ready_data_base.pkl"
 PKL_NO_BP = "../processed_data/model_ready_data_no_bp.pkl"
 DATA_PATH = "../data/PV130MW.xlsx"
 SEQ_LEN, LABEL_LEN, PRED_LEN = 96, 48, 24
-EPOCHS = 50
+EPOCHS = 100  # ✅ 增加训练轮数
 BATCH_SIZE = 32
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+def message6():
+    print(
+        "  ██▄▄▄██   ██▄▄██    ██▄▄██   ██▄▄▄██  \n"
+        "    ▀▀▀▀     ▀▀▀▀      ▀▀▀▀    ▀▀▀▀▀    ")
+
 
 
 def calculate_metrics(y_true, y_pred):
@@ -39,15 +46,15 @@ def calculate_metrics(y_true, y_pred):
 def get_model(exp_id, input_dim):
     """根据实验ID返回对应模型"""
     if exp_id == 0:
-        return BaselineFCModel(input_dim, pred_len=PRED_LEN, hidden_dim=128, dropout=0.2)
+        return TCN_LinearModel(input_dim, tcn_channels=[32, 64], pred_len=PRED_LEN, dropout=0.1)
     elif exp_id == 1:
-        return TCN_LinearModel(input_dim, tcn_channels=[16, 32], pred_len=PRED_LEN, dropout=0.15)
+        return TCN_LinearModel(input_dim, tcn_channels=[32, 64], pred_len=PRED_LEN, dropout=0.1)
     elif exp_id == 2:
-        return InformerOnlyModel(input_dim, SEQ_LEN, LABEL_LEN, PRED_LEN, d_model=64, n_heads=4, e_layers=2, dropout=0.15)
+        return InformerOnlyModel(input_dim, SEQ_LEN, LABEL_LEN, PRED_LEN, d_model=128, n_heads=8, e_layers=3, dropout=0.1)
     elif exp_id == 3:
-        return True_TCN_Informer(tcn_input_dim=input_dim, tcn_channels=[16, 32], seq_len=SEQ_LEN, label_len=LABEL_LEN, pred_len=PRED_LEN, d_model=64, n_heads=4, e_layers=2, dropout=0.15)
+        return True_TCN_Informer(tcn_input_dim=input_dim, tcn_channels=[32, 64, 128], seq_len=SEQ_LEN, label_len=LABEL_LEN, pred_len=PRED_LEN, d_model=128, n_heads=8, e_layers=3, dropout=0.1)
     elif exp_id == 4:
-        return True_TCN_Informer(tcn_input_dim=input_dim, tcn_channels=[16, 32], seq_len=SEQ_LEN, label_len=LABEL_LEN, pred_len=PRED_LEN, d_model=64, n_heads=4, e_layers=2, dropout=0.15)
+        return True_TCN_Informer(tcn_input_dim=input_dim, tcn_channels=[32, 64, 128], seq_len=SEQ_LEN, label_len=LABEL_LEN, pred_len=PRED_LEN, d_model=128, n_heads=8, e_layers=3, dropout=0.1)
 
 
 def train_model(model, train_loader, val_loader, epochs, device, exp_name, patience=10):
@@ -73,9 +80,7 @@ def train_model(model, train_loader, val_loader, epochs, device, exp_name, patie
             target_y = target_y.to(device)
             
             optimizer.zero_grad()
-            if exp_name == "Baseline_FC":
-                pred = model(seq_x, seq_x_mark, dec_x, dec_x_mark)
-            elif exp_name in ["BP_TCN", "NoBP_TCN"]:
+            if exp_name in ["NoBP_TCN", "Boruta-PCA_TCN", "NoBP_TCN-Informer"]:
                 pred = model(seq_x, seq_x_mark, dec_x, dec_x_mark, pred_len=PRED_LEN)
             else:
                 pred = model(seq_x, seq_x_mark, dec_x, dec_x_mark)
@@ -94,9 +99,7 @@ def train_model(model, train_loader, val_loader, epochs, device, exp_name, patie
                 dec_x, dec_x_mark = dec_x.to(device), dec_x_mark.to(device)
                 target_y = target_y.to(device)
                 
-                if exp_name == "Baseline_FC":
-                    pred = model(seq_x, seq_x_mark, dec_x, dec_x_mark)
-                elif exp_name in ["BP_TCN", "NoBP_TCN"]:
+                if exp_name in ["NoBP_TCN", "Boruta-PCA_TCN", "NoBP_TCN-Informer"]:
                     pred = model(seq_x, seq_x_mark, dec_x, dec_x_mark, pred_len=PRED_LEN)
                 else:
                     pred = model(seq_x, seq_x_mark, dec_x, dec_x_mark)
@@ -126,7 +129,11 @@ def train_model(model, train_loader, val_loader, epochs, device, exp_name, patie
     model.load_state_dict(best_state)
     return model, train_losses, val_losses
 
-
+def out():
+    print(
+        "    ▄▄▄▄     ▄▄▄▄      ▄▄▄▄    ▄▄▄▄▄    \n"
+        "  ██▀▀▀▀█   ██▀▀██    ██▀▀██   ██▀▀▀██  ")
+    m3()
 def evaluate_model(model, test_loader, scaler_y, device, max_capacity=130.0, exp_name=""):
     model.eval()
     preds_list, trues_list = [], []
@@ -138,9 +145,7 @@ def evaluate_model(model, test_loader, scaler_y, device, max_capacity=130.0, exp
             dec_x = dec_x.to(device)
             dec_x_mark = dec_x_mark.to(device)
             
-            if exp_name == "Baseline_FC":
-                pred = model(seq_x, seq_x_mark, dec_x, dec_x_mark)
-            elif exp_name in ["BP_TCN", "NoBP_TCN"]:
+            if exp_name in ["NoBP_TCN", "Boruta-PCA_TCN", "NoBP_TCN-Informer"]:
                 pred = model(seq_x, seq_x_mark, dec_x, dec_x_mark, pred_len=PRED_LEN)
             else:
                 pred = model(seq_x, seq_x_mark, dec_x, dec_x_mark)
@@ -163,22 +168,18 @@ def evaluate_model(model, test_loader, scaler_y, device, max_capacity=130.0, exp
     preds_inv = np.minimum(preds_inv, max_capacity)
     
     return preds_inv, trues_inv
+def m4():
+    print(" ██  ▄▄▄▄  ██    ██  ██    ██  ██    ██ ")
+    m5()
 def note():
     print("需要的时间有点长，耐心等着吧")
-
-def message2(name):
+def note2(name):
     if(name == "xyd"):
-        print(
-            "    ▄▄▄▄     ▄▄▄▄      ▄▄▄▄    ▄▄▄▄▄    \n"
-            "  ██▀▀▀▀█   ██▀▀██    ██▀▀██   ██▀▀▀██  \n"
-            " ██        ██    ██  ██    ██  ██    ██ \n"
-            " ██  ▄▄▄▄  ██    ██  ██    ██  ██    ██ \n"
-            " ██  ▀▀██  ██    ██  ██    ██  ██    ██ \n"
-            "  ██▄▄▄██   ██▄▄██    ██▄▄██   ██▄▄▄██  \n"
-            "    ▀▀▀▀     ▀▀▀▀      ▀▀▀▀    ▀▀▀▀▀    ")
+        out()
         print(f"居然运行成功了吗，{name}真棒👍👍👍")
-
-
+def m5():
+    print(" ██  ▀▀██  ██    ██  ██    ██  ██    ██ ")
+    message6()
 
 def evaluate_on_subsets(model, train_loader, test_loader, scaler_y, device, exp_name):
     """在训练集和测试集上分别评估"""
@@ -191,9 +192,7 @@ def evaluate_on_subsets(model, train_loader, test_loader, scaler_y, device, exp_
                 seq_x, seq_x_mark = seq_x.to(device), seq_x_mark.to(device)
                 dec_x, dec_x_mark = dec_x.to(device), dec_x_mark.to(device)
 
-                if exp_name == "Baseline_FC":
-                    pred = model(seq_x, seq_x_mark, dec_x, dec_x_mark)
-                elif exp_name in ["BP_TCN", "NoBP_TCN"]:
+                if exp_name in ["NoBP_TCN", "Boruta-PCA_TCN", "NoBP_TCN-Informer"]:
                     pred = model(seq_x, seq_x_mark, dec_x, dec_x_mark, pred_len=PRED_LEN)
                 else:
                     pred = model(seq_x, seq_x_mark, dec_x, dec_x_mark)
@@ -214,30 +213,26 @@ def evaluate_on_subsets(model, train_loader, test_loader, scaler_y, device, exp_
 
 
 def plot_results(exp_id, exp_name, trues, preds, train_losses, val_losses, y_limit=None):
-    """
-    绘制实验结果图表
-    :param y_limit: 统一纵坐标范围，如 (0, 140)
-    """
+    """绘制实验结果图表"""
     save_dir = f"ablation_results/exp{exp_id}_{exp_name}"
     os.makedirs(save_dir, exist_ok=True)
-
+    
     # 1. 预测曲线图 - 选择高功率样本
-    # 找到真实值中功率最高的样本
-    sample_power_max = np.max(trues, axis=1)  # 每个样本的最大功率
-    best_sample_idx = np.argmax(sample_power_max)  # 最大功率样本的索引
+    sample_power_max = np.max(trues, axis=1)
+    best_sample_idx = np.argmax(sample_power_max)
     
     plt.figure(figsize=(12, 5))
     plt.plot(trues[best_sample_idx, :], label='Ground Truth', color='blue', marker='o', markersize=4, linewidth=2)
     plt.plot(preds[best_sample_idx, :], label='Prediction', color='red', linestyle='--', marker='x', markersize=4, linewidth=2)
-    plt.title(f'Exp{exp_id}: {exp_name} - Prediction Curve (High Power Sample)', fontsize=12, fontweight='bold')
+    plt.title(f'Exp{exp_id}: {exp_name} - Prediction Curve', fontsize=12, fontweight='bold')
     plt.xlabel('Time Steps', fontsize=11); plt.ylabel('Power (MW)', fontsize=11)
     plt.legend(loc='best', fontsize=10); plt.grid(True, alpha=0.3)
     if y_limit:
-        plt.ylim(y_limit)  # 统一纵坐标
+        plt.ylim(y_limit)
     plt.tight_layout()
     plt.savefig(f'{save_dir}/prediction_curve.png', dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"   📈 已绘制高功率样本曲线 (样本索引: {best_sample_idx}, 峰值: {sample_power_max[best_sample_idx]:.2f} MW)")
+    print(f"   📈 已绘制高功率样本曲线 (峰值: {sample_power_max[best_sample_idx]:.2f} MW)")
 
     # 2. 散点图
     plt.figure(figsize=(8, 8))
@@ -266,6 +261,63 @@ def plot_results(exp_id, exp_name, trues, preds, train_losses, val_losses, y_lim
     print(f"   ✅ 图表已保存至: {save_dir}/")
 
 
+def plot_all_predictions_comparison(all_results, y_limit=None):
+    """绘制所有实验的预测对比图"""
+    save_dir = "ablation_results"
+    os.makedirs(save_dir, exist_ok=True)
+    
+    colors = ['blue', 'green', 'orange', 'red', 'purple', 'brown', 'pink']
+    markers = ['o', 's', '^', 'D', 'v', '<', '>']
+    
+    fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+    
+    for idx, result in enumerate(all_results):
+        exp_id = result['exp_id']
+        exp_name = result['exp_name']
+        preds = result['preds']
+        trues = result['trues']
+        
+        sample_power_max = np.max(trues, axis=1)
+        best_sample_idx = np.argmax(sample_power_max)
+        
+        color = colors[idx % len(colors)]
+        marker = markers[idx % len(markers)]
+        
+        axes[0].plot(trues[best_sample_idx, :], label='Ground Truth', color='black', marker='o', markersize=4, linewidth=2, alpha=0.8)
+        axes[0].plot(preds[best_sample_idx, :], label=exp_name, color=color, linestyle='--', marker=marker, markersize=3, linewidth=1.5, alpha=0.8)
+    
+    axes[0].set_title('All Experiments - Prediction Comparison', fontsize=12, fontweight='bold')
+    axes[0].set_xlabel('Time Steps', fontsize=11)
+    axes[0].set_ylabel('Power (MW)', fontsize=11)
+    axes[0].legend(loc='upper right', fontsize=8, ncol=2)
+    axes[0].grid(True, alpha=0.3)
+    if y_limit:
+        axes[0].set_ylim(y_limit)
+    
+    for idx, result in enumerate(all_results):
+        exp_name = result['exp_name']
+        preds = result['preds'].flatten()
+        trues = result['trues'].flatten()
+        color = colors[idx % len(colors)]
+        axes[1].scatter(trues, preds, alpha=0.4, s=8, label=exp_name, color=color)
+    
+    max_val = max(result['trues'].max() for result in all_results)
+    axes[1].plot([0, max_val], [0, max_val], 'k--', lw=2, label='Perfect')
+    axes[1].set_title('All Experiments - Scatter Comparison', fontsize=12, fontweight='bold')
+    axes[1].set_xlabel('True Power (MW)', fontsize=11)
+    axes[1].set_ylabel('Predicted Power (MW)', fontsize=11)
+    axes[1].legend(loc='upper left', fontsize=8, ncol=2)
+    axes[1].grid(True, alpha=0.3)
+    axes[1].set_xlim(0, max_val * 1.05)
+    axes[1].set_ylim(0, max_val * 1.05)
+    
+    plt.tight_layout()
+    plt.savefig(f'{save_dir}/all_experiments_comparison.png', dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"\n   🎯 汇总对比图已保存至: {save_dir}/all_experiments_comparison.png")
+def m3():
+    print(" ██        ██    ██  ██    ██  ██    ██ ")
+    m4()
 def run_ablation_experiment():
     print("=" * 60)
     print("🚀 消融实验开始")
@@ -275,19 +327,24 @@ def run_ablation_experiment():
         print("生成无BP处理数据...")
         run_without_bp_pipeline(DATA_PATH)
 
-    if not os.path.exists(PKL_WITH_BP):
-        print("生成BP处理数据...")
+    if not os.path.exists(PKL_BP_FULL):
+        print("生成BP-FULL处理数据...")
         run_feature_optimization_pipeline(DATA_PATH)
+    
+    if not os.path.exists(PKL_BP_BASE):
+        print("生成BP-BASE处理数据...")
+        run_feature_optimization_pipeline_base(DATA_PATH)
 
     results = []
-
-    # 注意这里，你如果已经跑完了前面的实验，但是因为某种原因中断了需要重新跑，那你就可以把已经跑过的实验注释掉再运行这个脚本
+    all_results_for_plot = []
+    # 实验配置
+    # TODO：注意这里，你如果已经跑完了前面的实验，但是因为某种原因中断了需要重新跑，那你就可以把已经跑过的实验注释掉再运行这个脚本，再用新的脚本绘图就是
     exp_configs = [
-        (0, "Baseline_FC", PKL_WITH_BP),  # 基线也应使用BP数据，公平对比模型架构
-        (1, "BP_TCN", PKL_WITH_BP),
-        (2, "BP_Informer", PKL_WITH_BP),
-        (3, "BP_TCN_Informer", PKL_WITH_BP),
-        (4, "NoBP_TCN_Informer", PKL_NO_BP),
+        (0, "NoBP_TCN", PKL_NO_BP),                      # 基线：NoBP + TCN
+        (1, "Boruta-PCA_TCN", PKL_BP_BASE),              # Boruta-PCA + TCN、
+        (2, "Boruta-PCA_Informer", PKL_BP_BASE),         # Boruta-PCA + Informer
+        (3, "Boruta-PCA_TCN-Informer", PKL_BP_FULL),     # 【完整方案】Boruta-PCA + TCN + Informer
+        (4, "NoBP_TCN-Informer", PKL_NO_BP),             # NoBP + TCN + Informer
     ]
 
     os.makedirs("ablation_results", exist_ok=True)
@@ -329,11 +386,20 @@ def run_ablation_experiment():
         
         torch.save(model.state_dict(), f'ablation_results/exp{exp_id}_{exp_name}/model.pth')
         
+        all_results_for_plot.append({
+            'exp_id': exp_id,
+            'exp_name': exp_name,
+            'preds': test_preds,
+            'trues': test_trues
+        })
+        
         results.append({
             'exp_id': exp_id, 'exp_name': exp_name, 'feature_dim': input_dim, 'params': params,
             'train_RMSE': train_metrics['RMSE'], 'train_MAE': train_metrics['MAE'], 'train_R2': train_metrics['R2'],
             'test_RMSE': test_metrics['RMSE'], 'test_MAE': test_metrics['MAE'], 'test_R2': test_metrics['R2']
         })
+    
+    plot_all_predictions_comparison(all_results_for_plot, y_limit=(0, 140))
     
     df_results = pd.DataFrame(results)
     df_results.to_csv('ablation_results/ablation_metrics.csv', index=False)
@@ -349,4 +415,4 @@ def run_ablation_experiment():
 if __name__ == "__main__":
     note()
     run_ablation_experiment()
-    message2("xyd")
+    note2("xyd")

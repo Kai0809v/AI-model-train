@@ -4,8 +4,6 @@ import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-import joblib
-import os
 
 # 导入前置模块
 from data_loader import create_dataloaders
@@ -223,6 +221,44 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
     metrics = calculate_metrics(trues_inverse.flatten(), preds_inverse.flatten())
     print("\n📊 最终测试集评估指标:")
     for k, v in metrics.items():
+        print(f"   {k}: {v:.4f}")
+
+    # ==========================================
+    # 7.1 训练集指标评估
+    # ==========================================
+    print("\n--- 开始训练集评估 ---")
+    model.eval()
+
+    train_preds_list = []
+    train_trues_list = []
+
+    with torch.no_grad():
+        for seq_x, seq_x_mark, dec_x, dec_x_mark, target_y in train_loader:
+            seq_x = seq_x.to(device)
+            seq_x_mark = seq_x_mark.to(device)
+            dec_x = dec_x.to(device)
+            dec_x_mark = dec_x_mark.to(device)
+
+            pred = model(seq_x, seq_x_mark, dec_x, dec_x_mark).detach().cpu().numpy()
+            true = target_y.detach().cpu().numpy()
+
+            train_preds_list.append(pred.squeeze(-1))
+            train_trues_list.append(true)
+
+    train_preds = np.concatenate(train_preds_list, axis=0)
+    train_trues = np.concatenate(train_trues_list, axis=0)
+
+    train_preds_inverse = scaler_y.inverse_transform(train_preds.reshape(-1, 1)).reshape(train_preds.shape)
+    train_trues_inverse = scaler_y.inverse_transform(train_trues.reshape(-1, 1)).reshape(train_trues.shape)
+
+    train_night_mask = (train_trues_inverse < 0.05)
+    train_preds_inverse[train_night_mask] = 0.0
+    train_preds_inverse = np.maximum(0, train_preds_inverse)
+    train_preds_inverse = np.minimum(train_preds_inverse, MAX_CAPACITY)
+
+    train_metrics = calculate_metrics(train_trues_inverse.flatten(), train_preds_inverse.flatten())
+    print("\n📊 训练集评估指标:")
+    for k, v in train_metrics.items():
         print(f"   {k}: {v:.4f}")
 
     # ==========================================

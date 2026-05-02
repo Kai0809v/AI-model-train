@@ -2,33 +2,73 @@
 
 ## 📊 当前配置
 
-**⚠️ 重要发现**：之前的 R²=0.9810 存在数据泄露问题，实际性能约为 R²=0.92~0.94
-
-**最新性能指标（修正后）**: 待重新训练后更新
-
-**模型配置**:
+**模型配置**（暂时不写特征工程部分）:
 ```python
-seq_len=96, label_len=48, pred_len=24
+seq_len=192, label_len=96, pred_len=24
 tcn_channels=[16, 32]
 d_model=64
 n_heads=4
 e_layers=2
 dropout=0.15
 criterion=MSELoss()
-optimizer=Adam(lr=0.001, weight_decay=1e-4)
+optimizer=Adam(lr=0.001, weight_decay=1e-3)
 scheduler=CosineAnnealingLR(T_max=epochs, eta_min=1e-6)
 patience=10
 batch_size=32
-
-# ✅ 特征列表（无数据泄露风险）
-features = [
-    'TSI', 'DNI', 'GHI', 'Temp', 'Atmosphere', 'Humidity',  # 气象特征
-    'TSI_Temp_interaction', 'GHI_Temp_interaction',  # 交互项
-    'TSI_Humidity_ratio', 'GHI_Humidity_ratio',  # 比值
-    'DNI_GHI_ratio', 'Temp_squared'  # 非线性
-]
-# ❌ 已移除：Power_lag_*, Power_rolling_* （数据泄露）
 ```
+### 时间序列参数
+
+| 参数 | 值 | 含义 |
+|------|-----|------|
+| `seq_len` | 192 | **输入序列长度**：观察过去 2 天（192步 × 15分钟 = 48小时） |
+| `label_len` | 96 | **解码器输入长度**：1 天（96步 × 15分钟 = 24小时） |
+| `pred_len` | 24 | **预测长度**：未来 6 小时（24步 × 15分钟） |
+
+> 在 Informer 中，`label_len` 是解码器从真实值开始的位置（用于引导），`pred_len` 是纯预测的长度
+
+---
+
+### TCN (Temporal Convolutional Network) 参数
+
+| 参数 | 值 | 含义 |
+|------|-----|------|
+| `tcn_channels` | `[16, 32]` | TCN 两层的通道数，逐层提取时序特征 |
+
+---
+
+### Informer 核心架构参数
+
+| 参数 | 值 | 含义 |
+|------|-----|------|
+| `d_model` | 64 | 模型隐藏层维度 |
+| `n_heads` | 4 | 多头注意力机制的头数 |
+| `e_layers` | 2 | 编码器层数（Transformer 层数） |
+| `dropout` | 0.15 | 随机失活率，防止过拟合 |
+
+---
+
+### 训练参数
+
+| 参数 | 值 | 含义 |
+|------|-----|------|
+| `batch_size` | 32 | 每批次训练的样本数 |
+| `learning_rate` | 0.001 | 初始学习率 |
+| `weight_decay` | 1e-3 | L2 正则化权重衰减 |
+| `patience` | 10 | 早停机制：验证loss 连续 10 次不下降则停止训练 |
+| `scheduler` | CosineAnnealingLR | 学习率调度：余弦退火，最低降至 1e-6 |
+| `criterion` | MSELoss() | 损失函数：均方误差 |
+
+---
+
+### 物理约束（后处理）
+
+| 约束 | 值 |
+|------|-----|
+| 夜间阈值 | < 0.05 MW 强制归零 |
+| 非负约束 | 预测值 ≥ 0 |
+| 装机容量 | ≤ 130 MW |
+
+这些参数共同构成了一个针对光伏功率预测优化的 TCN-Informer 混合模型架构。
 
 ---
 

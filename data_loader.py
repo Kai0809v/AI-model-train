@@ -75,9 +75,33 @@ def create_dataloaders(pkl_path, seq_len=96, label_len=48, pred_len=24, batch_si
 
     print("3. 正在封装 DataLoader...")
     # 只有训练集需要 shuffle (打乱)，验证集和测试集必须保持时间序列顺序
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, drop_last=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=False)
+    # 添加 num_workers 和 pin_memory 加速数据加载：
+    # - num_workers: 使用子进程并行加载数据
+    # - pin_memory: 锁页内存，加速 CPU→GPU 传输
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        drop_last=True,
+        num_workers=4,
+        pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        drop_last=False,
+        num_workers=2,
+        pin_memory=True
+    )
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        drop_last=False,
+        num_workers=2,
+        pin_memory=True
+    )
 
     print(f"✅ DataLoader 构建完成！")
     print(f"   -> Train Batches: {len(train_loader)} (总样本: {len(train_dataset)})")
