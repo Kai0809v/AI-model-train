@@ -11,7 +11,7 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 # 导入预测服务接口
-from api_v5 import ForecastService
+from api_v6 import ForecastService
 
 
 # ============================================

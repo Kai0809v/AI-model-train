@@ -94,7 +94,7 @@ Operation Steps:
 ### Method 2: Call API Interface (For Developers)
 
 ```python
-from api_v5 import ForecastService
+from api_v6 import ForecastService
 import pandas as pd
 
 # Initialize prediction service
