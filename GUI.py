@@ -369,17 +369,28 @@ class PredictionWorker(QThread):
 
     def run(self):
         try:
-            self.progress.emit(10, "正在读取 CSV 历史数据...")
+            self.progress.emit(10, "正在读取历史数据...")
+            
+            # 🔧 智能识别文件格式并读取
+            file_ext = os.path.splitext(self.file_path)[1].lower()
             try:
-                df = pd.read_csv(self.file_path)
+                if file_ext == '.csv':
+                    df = pd.read_csv(self.file_path)
+                    self.progress.emit(15, f"已读取CSV文件: {os.path.basename(self.file_path)}")
+                elif file_ext in ['.xlsx', '.xls']:
+                    df = pd.read_excel(self.file_path, engine='openpyxl' if file_ext == '.xlsx' else None)
+                    self.progress.emit(15, f"已读取Excel文件: {os.path.basename(self.file_path)}")
+                else:
+                    self.error.emit(f"不支持的文件格式: {file_ext}。仅支持 .csv 和 .xlsx 格式。")
+                    return
             except Exception as e:
-                self.error.emit(f"文件读取失败，请检查文件格式。\n详情：{str(e)}")
+                self.error.emit(f"文件读取失败，请检查文件格式是否正确。\n详情：{str(e)}")
                 return
 
             # 🔧 新增：数据质量检查与清洗
             original_rows = len(df)
             
-            # 1. 删除全是 NaN 的空白行（处理 CSV 中可能的空行）
+            # 1. 删除全是 NaN 的空白行（处理 CSV/Excel 中可能的空行）
             df = df.dropna(how='all').reset_index(drop=True)
             cleaned_rows = len(df)
             
@@ -526,8 +537,8 @@ class EnergyForecastApp(QMainWindow):
         self.type_combo.currentTextChanged.connect(self.on_scene_changed)
         left_layout.addWidget(self.type_combo)
 
-        # ===== 历史数据 (CSV) =====
-        data_label = QLabel("历史数据 (CSV):")
+        # ===== 历史数据 (CSV/xlsx) =====
+        data_label = QLabel("历史数据 (CSV/xlsx):")
         data_label.setStyleSheet("background-color: transparent; color: #37474f; font-size: 13px;")
         left_layout.addWidget(data_label)
         
@@ -572,7 +583,7 @@ class EnergyForecastApp(QMainWindow):
         left_layout.addWidget(self.mode_combo)
 
         # ===== 未来气象数据（仅“有未来气象数据”模式可见）=====
-        self.future_weather_label = QLabel("未来气象数据 (CSV):")
+        self.future_weather_label = QLabel("未来气象数据 (CSV/xlsx):")
         self.future_weather_label.setStyleSheet("background-color: transparent; color: #37474f; font-size: 13px;")
         left_layout.addWidget(self.future_weather_label)
 
@@ -762,10 +773,15 @@ class EnergyForecastApp(QMainWindow):
     def load_future_weather_file(self):
         """选择未来气象数据文件"""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择未来气象数据文件", "", "CSV Files (*.csv);;All Files (*)")
+            self, 
+            "选择未来气象数据文件", 
+            "", 
+            "数据文件 (*.csv *.xlsx *.xls);;CSV Files (*.csv);;Excel Files (*.xlsx *.xls);;All Files (*)"
+        )
         if file_path:
             self.future_weather_input.setText(file_path)
-            self.append_log(f"已装载未来气象数据：{file_path}")
+            ext = os.path.splitext(file_path)[1].upper()
+            self.append_log(f"已装载{ext}格式未来气象数据：{file_path}")
 
     def append_log(self, text):
         self.log_output.append(f"⚡ {text}")
@@ -773,10 +789,17 @@ class EnergyForecastApp(QMainWindow):
         scrollbar.setValue(scrollbar.maximum())
 
     def load_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV Files (*.csv);;All Files (*)")
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, 
+            "选择历史数据文件", 
+            "", 
+            "数据文件 (*.csv *.xlsx *.xls);;CSV Files (*.csv);;Excel Files (*.xlsx *.xls);;All Files (*)"
+        )
         if file_path:
             self.file_input.setText(file_path)
-            self.append_log(f"已装载历史数据：{file_path}")
+            # 显示文件格式
+            ext = os.path.splitext(file_path)[1].upper()
+            self.append_log(f"已装载{ext}格式历史数据：{file_path}")
 
     def run_prediction(self):
         file_path = self.file_input.text()
@@ -816,6 +839,12 @@ class EnergyForecastApp(QMainWindow):
             future_weather_path = self.future_weather_input.text()
             if not future_weather_path:
                 QMessageBox.warning(self, "提示", "当前为【有未来气象数据】模式，请先选择未来气象数据文件！")
+                return
+                        
+            # 🔧 验证未来气象数据文件格式
+            future_ext = os.path.splitext(future_weather_path)[1].lower()
+            if future_ext not in ['.csv', '.xlsx', '.xls']:
+                QMessageBox.warning(self, "提示", f"未来气象数据文件格式不支持: {future_ext}。仅支持 .csv 和 .xlsx 格式。")
                 return
 
         # 🔧 修改：根据场景和步长选项映射步数
@@ -876,6 +905,9 @@ class EnergyForecastApp(QMainWindow):
         elif "predictions" in result:
             # 多步预测
             vals = result["predictions"]
+            # 兼容嵌套列表格式: [[0.37, 0.46, ...]] -> [0.37, 0.46, ...]
+            if isinstance(vals, list) and len(vals) > 0 and isinstance(vals[0], list):
+                vals = [v for sublist in vals for v in sublist]
             avg_val = sum(vals) / len(vals)
             
             # 计算时间跨度描述

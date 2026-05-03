@@ -1,6 +1,10 @@
 """
 光伏TCN-Informer预处理器
-复刻PV_part1.py的完整特征工程流程: 32原始特征 → StandardScaler → Boruta筛选28个 → PCA降维11个
+复刻PV_part1.py的完整特征工程流程: 原始数据 → 列名映射 → 交互特征 → 滞后/滚动特征 → 32原始特征 → StandardScaler → Boruta筛选28个 → PCA降维11个
+
+支持两种输入格式:
+1. 原始数据(7+1列): 包含原始列名如 'Total solar irradiance (W/m2)', 'Power (MW)' 等
+2. 已处理数据(32列): 包含短名如 'TSI', 'Power_lag_4' 等
 """
 import numpy as np
 import pandas as pd
@@ -11,8 +15,21 @@ import os
 class PV_Preprocessor:
     """
     光伏TCN-Informer预处理器
-    负责特征工程、标准化、Boruta筛选和PCA降维
+    负责列名映射、特征工程、标准化、Boruta筛选和PCA降维
     """
+    
+    # 原始列名 → 短名 映射 (与PV_part1.py一致)
+    COL_MAPPING = {
+        'Time(year-month-day h:m:s)': 'Time',
+        'Total solar irradiance (W/m2)': 'TSI',
+        'Direct normal irradiance (W/m2)': 'DNI',
+        'Global horicontal irradiance (W/m2)': 'GHI',
+        'Air temperature  (°C) ': 'Temp',
+        'Air temperature  (°C)': 'Temp',
+        'Atmosphere (hpa)': 'Atmosphere',
+        'Relative humidity (%)': 'Humidity',
+        'Power (MW)': 'Power',
+    }
     
     def __init__(self, asset_dir):
         """
@@ -56,14 +73,125 @@ class PV_Preprocessor:
             for feat in self.selected_features
         ]
         
+    def _is_raw_data(self, df: pd.DataFrame) -> bool:
+        """判断DataFrame是否为原始数据(需要列名映射和特征工程)"""
+        # 如果已经有32个特征列中的大部分，说明已经处理过了
+        existing_feature_cols = [c for c in self.all_feature_cols if c in df.columns]
+        if len(existing_feature_cols) >= 20:
+            return False  # 已经处理过
+        # 检查是否有原始列名
+        raw_cols = set(self.COL_MAPPING.keys())
+        df_cols = set(df.columns.astype(str))
+        return len(raw_cols & df_cols) >= 3  # 至少有3个原始列名
+    
+    def _normalize_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        将原始数据转换为包含32个特征列的标准格式
+        1. 列名映射 (原始长名 → 短名)
+        2. 时间列解析
+        3. 构建交互特征 (6个)
+        4. 构建温度修正特征 (2个)
+        5. 构建滞后特征 (6个)
+        6. 构建滚动统计特征 (12个)
+        7. 填充NaN值
+        """
+        df_out = df.copy()
+        
+        # 1. 列名映射
+        # 匹配原始列名(注意可能有额外空格)
+        rename_map = {}
+        for raw_col in df_out.columns:
+            raw_col_stripped = raw_col.strip()
+            if raw_col_stripped in self.COL_MAPPING:
+                rename_map[raw_col] = self.COL_MAPPING[raw_col_stripped]
+        if rename_map:
+            df_out.rename(columns=rename_map, inplace=True)
+        
+        # 2. 解析时间列并设为索引
+        time_col = None
+        for col_name in ['Time', 'time', 'timestamp', 'datetime']:
+            if col_name in df_out.columns:
+                time_col = col_name
+                break
+        
+        if time_col is not None:
+            df_out[time_col] = pd.to_datetime(df_out[time_col])
+            if not isinstance(df_out.index, pd.DatetimeIndex):
+                df_out.set_index(time_col, inplace=True)
+        
+        # 3. 构建交互特征 (与PV_part1.py一致)
+        if 'TSI_Temp_interaction' not in df_out.columns:
+            df_out['TSI_Temp_interaction'] = df_out['TSI'] * df_out['Temp']
+        if 'GHI_Temp_interaction' not in df_out.columns:
+            df_out['GHI_Temp_interaction'] = df_out['GHI'] * df_out['Temp']
+        if 'TSI_Humidity_ratio' not in df_out.columns:
+            df_out['TSI_Humidity_ratio'] = df_out['TSI'] / (df_out['Humidity'] + 1e-6)
+        if 'GHI_Humidity_ratio' not in df_out.columns:
+            df_out['GHI_Humidity_ratio'] = df_out['GHI'] / (df_out['Humidity'] + 1e-6)
+        if 'DNI_GHI_ratio' not in df_out.columns:
+            df_out['DNI_GHI_ratio'] = df_out['DNI'] / (df_out['GHI'] + 1e-6)
+        if 'Temp_squared' not in df_out.columns:
+            df_out['Temp_squared'] = df_out['Temp'] ** 2
+        
+        # 4. 温度修正特征 (与PV_part1.py一致)
+        if 'TSI_Corrected' not in df_out.columns:
+            df_out['TSI_Corrected'] = df_out['TSI'] * (1 - 0.004 * (df_out['Temp'] - 25))
+        if 'GHI_Corrected' not in df_out.columns:
+            df_out['GHI_Corrected'] = df_out['GHI'] * (1 - 0.004 * (df_out['Temp'] - 25))
+        
+        # 5. 滞后特征 (与PV_part1.py一致)
+        for lag in [4, 12, 24]:
+            col_name = f'Power_lag_{lag}'
+            if col_name not in df_out.columns:
+                df_out[col_name] = df_out['Power'].shift(lag)
+        for lag in [4]:
+            for feat in ['TSI', 'DNI', 'GHI']:
+                col_name = f'{feat}_lag_{lag}'
+                if col_name not in df_out.columns:
+                    df_out[col_name] = df_out[feat].shift(lag)
+        
+        # 6. 滚动统计特征 (与PV_part1.py一致)
+        for window in [12, 48, 96]:
+            col_name = f'Power_rolling_mean_{window}'
+            if col_name not in df_out.columns:
+                df_out[col_name] = df_out['Power'].rolling(window=window).mean()
+            col_name = f'Power_rolling_std_{window}'
+            if col_name not in df_out.columns:
+                df_out[col_name] = df_out['Power'].rolling(window=window).std()
+            for feat in ['TSI', 'GHI']:
+                col_name = f'{feat}_rolling_mean_{window}'
+                if col_name not in df_out.columns:
+                    df_out[col_name] = df_out[feat].rolling(window=window).mean()
+        
+        # 7. 填充NaN值 (滞后和滚动特征会在开头产生NaN)
+        df_out.ffill(inplace=True)
+        df_out.bfill(inplace=True)
+        
+        # 最终检查: 确保所有32个特征列都存在
+        missing_cols = [c for c in self.all_feature_cols if c not in df_out.columns]
+        if missing_cols:
+            raise ValueError(f"特征工程后仍缺少列: {missing_cols}")
+        
+        return df_out
+    
     def transform(self, df: pd.DataFrame) -> tuple:
         """
         对历史数据进行完整的特征工程+标准化+Boruta筛选+PCA降维
-        :param df: 历史数据DataFrame(至少192行,必须包含32个特征列)
-        :return: (pca_features, time_features)
+        
+        支持两种输入格式:
+        - 原始数据(7+1列): 包含原始列名如 'Total solar irradiance (W/m2)' 等
+        - 已处理数据(32列): 包含短名如 'TSI', 'Power_lag_4' 等
+        
+        :param df: 历史数据DataFrame(至少192行原始数据)
+        :return: (pca_features, time_features, last_timestamp)
                  - pca_features: [192, 11] PCA降维后的特征
                  - time_features: [192, 5] 时间标记(Month, Day, DayOfWeek, Hour, Minute)
+                 - last_timestamp: 最后一个时间点(pd.Timestamp), 用于生成未来时间特征
         """
+        # 0. 如果是原始数据，先进行列名映射和特征工程
+        if self._is_raw_data(df):
+            df = self._normalize_dataframe(df)
+        
         if len(df) < 192:
             raise ValueError(f"输入数据不足!需要至少192行,当前{len(df)}行")
         
@@ -93,14 +221,26 @@ class PV_Preprocessor:
         # 7. 提取时间特征
         time_features = self._extract_time_features(df_recent)  # [192, 5]
         
-        return pca_features, time_features
+        # 8. 获取最后的时间戳
+        last_timestamp = self._get_last_timestamp(df_recent)
+        
+        return pca_features, time_features, last_timestamp
     
     def transform_future_with_weather(self, future_df: pd.DataFrame) -> np.ndarray:
         """
         处理未来气象数据(有未来数据模式)
-        :param future_df: 未来24步的气象数据DataFrame(必须包含32个特征列)
+        
+        支持两种输入格式:
+        - 原始数据(7+1列): 包含原始列名
+        - 已处理数据(32列): 包含短名
+        
+        :param future_df: 未来24步的气象数据DataFrame(至少24行)
         :return: PCA特征数组 [24, 11]
         """
+        # 0. 如果是原始数据，先进行列名映射和特征工程
+        if self._is_raw_data(future_df):
+            future_df = self._normalize_dataframe(future_df)
+        
         # 1. 验证列名
         if not all(col in future_df.columns for col in self.all_feature_cols):
             missing = [col for col in self.all_feature_cols if col not in future_df.columns]
@@ -121,9 +261,18 @@ class PV_Preprocessor:
     def approximate_future_without_weather(self, df_recent: pd.DataFrame) -> np.ndarray:
         """
         用历史数据近似未来24步特征(无未来数据模式)
-        :param df_recent: 最近192步的历史数据(已包含32个特征)
+        
+        支持两种输入格式:
+        - 原始数据: 会先进行列名映射和特征工程
+        - 已处理数据: 直接使用
+        
+        :param df_recent: 最近192步的历史数据
         :return: 近似的PCA特征数组 [24, 11]
         """
+        # 0. 如果是原始数据，先进行列名映射和特征工程
+        if self._is_raw_data(df_recent):
+            df_recent = self._normalize_dataframe(df_recent)
+        
         # 取最后4步的平均值作为未来24步的近似
         last_n_steps = 4
         approx_features_full = df_recent[self.all_feature_cols].iloc[-last_n_steps:].mean().values.reshape(1, -1)
@@ -164,6 +313,16 @@ class PV_Preprocessor:
         
         time_feats = np.column_stack([month.values, day.values, dow.values, hour.values, minute.values])
         return time_feats
+    
+    def _get_last_timestamp(self, df: pd.DataFrame) -> pd.Timestamp:
+        """从DataFrame中获取最后一个时间戳"""
+        if isinstance(df.index, pd.DatetimeIndex):
+            return df.index[-1]
+        # 尝试从列中查找时间列
+        for col_name in ['Time', '时间', 'timestamp', 'datetime']:
+            if col_name in df.columns:
+                return pd.to_datetime(df[col_name].iloc[-1])
+        raise ValueError("未找到时间列,无法获取最后时间戳")
     
     def _extract_time_features(self, df: pd.DataFrame) -> np.ndarray:
         """

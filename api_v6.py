@@ -252,7 +252,7 @@ class PV_TCN_Informer_Predictor:
                 return {"success": False, "error": f"预测步长必须在1-{self.model_wrapper.max_pred_len}之间"}
             
             # 1. 预处理历史数据
-            pca_history, time_history = self.preprocessor.transform(df)  # [192, 11], [192, 5]
+            pca_history, time_history, last_timestamp = self.preprocessor.transform(df)  # [192, 11], [192, 5], Timestamp
             
             # 2. 确定解码器输入的未来部分
             if mode == "with_future":
@@ -260,21 +260,18 @@ class PV_TCN_Informer_Predictor:
                     raise ValueError("mode='with_future'时必须提供future_weather_df参数")
                 pca_future = self.preprocessor.transform_future_with_weather(future_weather_df)
             elif mode == "without_future":
-                df_recent = df.iloc[-192:].copy()
-                pca_future = self.preprocessor.approximate_future_without_weather(df_recent)
+                pca_future = self.preprocessor.approximate_future_without_weather(df)
             else:  # mode == "auto"
                 if future_weather_df is not None:
                     pca_future = self.preprocessor.transform_future_with_weather(future_weather_df)
                 else:
-                    df_recent = df.iloc[-192:].copy()
-                    pca_future = self.preprocessor.approximate_future_without_weather(df_recent)
+                    pca_future = self.preprocessor.approximate_future_without_weather(df)
             
             # 3. 构建Informer所需的四种输入
             seq_x = torch.FloatTensor(pca_history).unsqueeze(0)  # [1, 192, 11]
             seq_x_mark = torch.FloatTensor(time_history).unsqueeze(0)  # [1, 192, 5]
             
             # 生成未来时间标记
-            last_timestamp = df.index[-1]
             time_future = self.preprocessor.generate_future_time_features(last_timestamp)  # [24, 5]
             time_full = np.vstack([time_history, time_future])  # [216, 5]
             

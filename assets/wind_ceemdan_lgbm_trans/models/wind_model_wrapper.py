@@ -6,25 +6,66 @@ import torch
 import torch.nn as nn
 import numpy as np
 import os
+import math
+
+
+class PositionalEncoding(nn.Module):
+    """位置编码(与训练代码保持一致)"""
+    def __init__(self, d_model, max_len=5000):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        x = x + self.pe[:, :x.size(1), :]
+        return x
 
 
 class SimpleMultiStepTransformer(nn.Module):
-    """简化版多步Transformer模型(与训练时保持一致)"""
-    def __init__(self, input_dim, horizon=1, d_model=64, nhead=4, num_layers=2, dim_feedforward=128, dropout=0.1):
+    """V4稳定架构(与训练代码part2_multi_horizon_v6_ensemble.py保持一致)"""
+    def __init__(self, input_dim, horizon=1):
         super().__init__()
-        self.input_proj = nn.Linear(input_dim, d_model)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, dropout=dropout)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.horizon = horizon
-        self.fc = nn.Linear(d_model, horizon)
         
+        self.embedding = nn.Linear(input_dim, 256)
+        self.pos_encoder = PositionalEncoding(d_model=256)
+        
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=256, nhead=8, dim_feedforward=512,
+            batch_first=True, dropout=0.1
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=4)
+        
+        self.attention_pooling = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.Tanh(),
+            nn.Linear(128, 1)
+        )
+        
+        self.fc = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, horizon)
+        )
+    
     def forward(self, x):
-        # x: [batch, seq_len, features]
-        x = self.input_proj(x)  # [batch, seq_len, d_model]
-        x = x.permute(1, 0, 2)  # [seq_len, batch, d_model]
-        x = self.transformer_encoder(x)  # [seq_len, batch, d_model]
-        x = x[-1, :, :]  # [batch, d_model] - 取最后一个时间步
-        output = self.fc(x)  # [batch, horizon]
+        x = self.embedding(x)
+        x = self.pos_encoder(x)
+        x = self.transformer(x)
+        
+        attention_weights = self.attention_pooling(x)
+        attention_weights = torch.softmax(attention_weights, dim=1)
+        context = torch.sum(x * attention_weights, dim=1)
+        
+        output = self.fc(context)
         return output
 
 
@@ -59,9 +100,9 @@ class Wind_ModelWrapper:
                     ensemble_package = torch.load(ensemble_path, map_location=self.device, weights_only=False)
                     models = []
                     
-                    # 从第一个模型获取input_dim
+                    # 从第一个模型获取input_dim（通过embedding.weight的第二维）
                     first_state_dict = ensemble_package['model_state_dicts'][0]
-                    input_dim = first_state_dict['input_proj.weight'].shape[1]
+                    input_dim = first_state_dict['embedding.weight'].shape[1]
                     
                     for state_dict in ensemble_package['model_state_dicts']:
                         model = SimpleMultiStepTransformer(
