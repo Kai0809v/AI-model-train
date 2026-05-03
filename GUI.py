@@ -1,5 +1,5 @@
 import sys
-
+import os
 import pandas as pd
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QIcon
@@ -8,9 +8,24 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QLineEdit, QFileDialog, QTextEdit, QFrame,
                                QProgressBar, QMessageBox, QStackedWidget)
 
-# 导入预测服务接口
-from api_v5 import ForecastService
+# ============================================
+# 资源路径处理工具（解决打包后路径失效问题）
+# ============================================
+def resource_path(relative_path):
+    """获取资源的绝对路径，兼容开发环境和 PyInstaller 打包环境"""
+    if hasattr(sys, '_MEIPASS'):
+        base = sys._MEIPASS
+    else:
+        base = os.path.abspath(".")
+    
+    # 🔧 关键修复：将 Windows 的反斜杠 \ 替换为正斜杠 /，因为 Qt 样式表只认 /
+    path = os.path.join(base, relative_path).replace('\\', '/')
+    return path
 
+# 导入预测服务接口
+from api_v6 import ForecastService
+# 机器学习小组
+MLG_VERSION = "V1.6" 
 
 # ============================================
 # 登录页面
@@ -61,7 +76,7 @@ class LoginPage(QWidget):
             "font-size: 26px; font-weight: bold; color: #1b5e20; border: none; background: transparent;")
         title_layout.addWidget(title)
 
-        subtitle = QLabel("V0.6 · 智能预测引擎")
+        subtitle = QLabel(f"{MLG_VERSION} · 智能预测引擎")
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setStyleSheet(
             "font-size: 13px; color: #4caf50; font-weight: bold; border: none; background: transparent;")
@@ -343,26 +358,39 @@ class PredictionWorker(QThread):
     finished = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, service, file_path, model_name, steps=1):
+    def __init__(self, service, file_path, model_name, steps=1, mode="auto", future_weather_path=None):
         super().__init__()
         self.service = service
         self.file_path = file_path
         self.model_name = model_name
         self.steps = steps
+        self.mode = mode
+        self.future_weather_path = future_weather_path
 
     def run(self):
         try:
-            self.progress.emit(10, "正在读取 CSV 历史数据...")
+            self.progress.emit(10, "正在读取历史数据...")
+            
+            # 🔧 智能识别文件格式并读取
+            file_ext = os.path.splitext(self.file_path)[1].lower()
             try:
-                df = pd.read_csv(self.file_path)
+                if file_ext == '.csv':
+                    df = pd.read_csv(self.file_path)
+                    self.progress.emit(15, f"已读取CSV文件: {os.path.basename(self.file_path)}")
+                elif file_ext in ['.xlsx', '.xls']:
+                    df = pd.read_excel(self.file_path, engine='openpyxl' if file_ext == '.xlsx' else None)
+                    self.progress.emit(15, f"已读取Excel文件: {os.path.basename(self.file_path)}")
+                else:
+                    self.error.emit(f"不支持的文件格式: {file_ext}。仅支持 .csv 和 .xlsx 格式。")
+                    return
             except Exception as e:
-                self.error.emit(f"文件读取失败，请检查文件格式。\n详情：{str(e)}")
+                self.error.emit(f"文件读取失败，请检查文件格式是否正确。\n详情：{str(e)}")
                 return
 
             # 🔧 新增：数据质量检查与清洗
             original_rows = len(df)
             
-            # 1. 删除全是 NaN 的空白行（处理 CSV 中可能的空行）
+            # 1. 删除全是 NaN 的空白行（处理 CSV/Excel 中可能的空行）
             df = df.dropna(how='all').reset_index(drop=True)
             cleaned_rows = len(df)
             
@@ -382,11 +410,13 @@ class PredictionWorker(QThread):
                     '测风塔 70m 风速 (m/s)', '轮毂高度风速 (m/s)', '测风塔 10m 风向 (°)',
                     '测风塔 30m 风向 (°)', '测风塔 50m 风向 (°)', '测风塔 70m 风向 (°)',
                     '轮毂高度风向 (°)', '温度 (°)', '气压 (hPa)', '湿度 (%)',
-                    '实际发电功率（mw）'
+                    '实际发电功率（mw）',
+                    # 光伏特征列
+                    'TSI', 'DNI', 'GHI', 'Temp', 'Atmosphere', 'Humidity',
                 ]
                 
                 available_cols = [col for col in critical_cols if col in df.columns]
-                df[available_cols] = df[available_cols].fillna(method='ffill').fillna(method='bfill')
+                df[available_cols] = df[available_cols].ffill().bfill()
                 
                 # 如果还有 NaN，用均值填补
                 for col in available_cols:
@@ -394,15 +424,25 @@ class PredictionWorker(QThread):
                         df[col].fillna(df[col].mean(), inplace=True)
             
             # 3. 最终检查：确保有足够的有效数据
-            if len(df) < 96:
-                self.error.emit(f"❌ 数据量不足！删除空白行后仅剩 {len(df)} 行有效数据，需要至少 96 行（24 小时）。")
+            min_rows = 192 if self.model_name == "PV_TCN_Informer" else 96
+            if len(df) < min_rows:
+                self.error.emit(f"❌ 数据量不足！删除空白行后仅剩 {len(df)} 行有效数据，{self.model_name} 模型需要至少 {min_rows} 行。")
                 return
             
             self.progress.emit(30, f"数据校验通过，有效数据共 {len(df)} 行。正在加载模型...")
             self.progress.emit(50, f"正在加载模型 [{self.model_name}]...")
             self.progress.emit(70, "模型就绪，正在执行核心预测算法...")
 
-            result = self.service.run(self.model_name, df, self.steps)
+            # 🔧 构建额外参数
+            kwargs = {}
+            if self.model_name == "PV_TCN_Informer":
+                kwargs["mode"] = self.mode
+                if self.mode == "with_future" and self.future_weather_path:
+                    self.progress.emit(75, "正在加载未来气象数据...")
+                    future_df = pd.read_csv(self.future_weather_path)
+                    kwargs["future_weather_df"] = future_df
+
+            result = self.service.run(self.model_name, df, self.steps, **kwargs)
 
             if result.get("success"):
                 self.progress.emit(100, "✅ 预测计算完成！")
@@ -410,6 +450,8 @@ class PredictionWorker(QThread):
             else:
                 self.error.emit(result.get("error", "未知预测错误"))
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             self.error.emit(f"预测过程中发生严重系统异常：{str(e)}")
 
 
@@ -420,7 +462,7 @@ class EnergyForecastApp(QMainWindow):
     def __init__(self):
         super().__init__()
         # 调整了窗口尺寸，高度不再过于冗长
-        self.setWindowTitle("综合能源预测系统 V0.6")
+        self.setWindowTitle(f"综合能源预测系统 {MLG_VERSION}")
         self.resize(1000, 600)
 
         self.current_username = None
@@ -484,18 +526,19 @@ class EnergyForecastApp(QMainWindow):
         def style_combo(combo):
             combo.setStyleSheet("padding: 6px; border: 1px solid #cfd8dc; border-radius: 4px; background: white;")
 
-        # 预测场景标签
+        # ===== 预测场景 =====
         scene_label = QLabel("预测场景:")
         scene_label.setStyleSheet("background-color: transparent; color: #37474f; font-size: 13px;")
         left_layout.addWidget(scene_label)
         
         self.type_combo = QComboBox()
-        self.type_combo.addItems(["风电功率预测", "光伏功率预测", "电网负荷预测"])
+        self.type_combo.addItems(["风电功率预测", "光伏功率预测", "电网负荷预测（后续更新）"])
         style_combo(self.type_combo)
+        self.type_combo.currentTextChanged.connect(self.on_scene_changed)
         left_layout.addWidget(self.type_combo)
 
-        # 历史数据标签
-        data_label = QLabel("历史数据 (CSV):")
+        # ===== 历史数据 (CSV/xlsx) =====
+        data_label = QLabel("历史数据 (CSV/xlsx):")
         data_label.setStyleSheet("background-color: transparent; color: #37474f; font-size: 13px;")
         left_layout.addWidget(data_label)
         
@@ -515,33 +558,86 @@ class EnergyForecastApp(QMainWindow):
         file_layout.addWidget(self.browse_btn)
         left_layout.addLayout(file_layout)
 
-        # 算法模型标签
+        # ===== 算法模型 =====
         model_label = QLabel("算法模型:")
         model_label.setStyleSheet("background-color: transparent; color: #37474f; font-size: 13px;")
         left_layout.addWidget(model_label)
         
         self.model_combo = QComboBox()
-        self.model_map = {
-            "CEEMDAN-LGBM-Transformer": "CEEMDAN_LGBM_Transformer",
-        }
-        self.model_combo.addItems(list(self.model_map.keys()))
         style_combo(self.model_combo)
         left_layout.addWidget(self.model_combo)
 
-        # 预测步长标签
+        # ===== 预测模式（仅光伏模型可见）=====
+        self.mode_label = QLabel("预测模式:")
+        self.mode_label.setStyleSheet("background-color: transparent; color: #37474f; font-size: 13px;")
+        left_layout.addWidget(self.mode_label)
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems([
+            "自动选择（推荐）",
+            "有未来气象数据",
+            "无未来气象数据（历史近似）"
+        ])
+        style_combo(self.mode_combo)
+        self.mode_combo.currentTextChanged.connect(self.on_mode_changed)
+        left_layout.addWidget(self.mode_combo)
+
+        # ===== 未来气象数据（仅“有未来气象数据”模式可见）=====
+        self.future_weather_label = QLabel("未来气象数据 (CSV/xlsx):")
+        self.future_weather_label.setStyleSheet("background-color: transparent; color: #37474f; font-size: 13px;")
+        left_layout.addWidget(self.future_weather_label)
+
+        future_file_layout = QHBoxLayout()
+        self.future_weather_input = QLineEdit()
+        self.future_weather_input.setPlaceholderText("选择未来24步气象数据...")
+        self.future_weather_input.setReadOnly(True)
+        self.future_weather_input.setStyleSheet(
+            "padding: 6px; border: 1px solid #cfd8dc; border-radius: 4px; background: #f8f9fa;")
+
+        self.future_browse_btn = QPushButton("浏览")
+        self.future_browse_btn.setStyleSheet(
+            "padding: 6px 12px; background: #00897b; color: white; border-radius: 4px; font-weight: bold;")
+        self.future_browse_btn.clicked.connect(self.load_future_weather_file)
+
+        future_file_layout.addWidget(self.future_weather_input)
+        future_file_layout.addWidget(self.future_browse_btn)
+        left_layout.addLayout(future_file_layout)
+
+        # ===== 预测步长 =====
         steps_label = QLabel("预测步长:")
         steps_label.setStyleSheet("background-color: transparent; color: #37474f; font-size: 13px;")
         left_layout.addWidget(steps_label)
         
         self.steps_combo = QComboBox()
-        self.steps_combo.addItems([
-            "下一时刻（单步）",
-            "一小时（4 步）",
-            "两小时（8 步）",
-            "四小时（16 步）"
-        ])
         style_combo(self.steps_combo)
         left_layout.addWidget(self.steps_combo)
+
+        # 初始化场景（触发模型列表和步长更新）
+        self._model_maps = {
+            "风电功率预测": {
+                "CEEMDAN-LGBM-Transformer": "CEEMDAN_LGBM_Transformer",
+            },
+            "光伏功率预测": {
+                "PV-TCN-Informer": "PV_TCN_Informer",
+            },
+            "电网负荷预测（后续更新）": {},
+        }
+        self._steps_options = {
+            "风电功率预测": [
+                "下一时刻（单步）",
+                "一小时（4 步）",
+                "两小时（8 步）"
+            ],
+            "光伏功率预测": [
+                "下一时刻（1 步）",
+                "一小时（4 步）",
+                "两小时（8 步）",
+                "三小时（12 步）",
+                "六小时（24 步）",
+            ],
+            "电网负荷预测（后续更新）": [],
+        }
+        self.on_scene_changed(self.type_combo.currentText())
 
         left_layout.addStretch()
 
@@ -596,26 +692,28 @@ class EnergyForecastApp(QMainWindow):
         self.pred_value_card = QFrame()
         self.pred_value_card.setStyleSheet("""
             QFrame { 
-                background-color: rgba(255, 255, 255, 0.95); 
-                border-radius: 12px; 
-                padding: 15px;
+                background-color: rgba(255, 255, 255, 0.80); 
+                border-radius: 10px; 
+                padding: 8px;
                 border: 2px solid #4caf50;
             }
         """)
-        pred_layout = QVBoxLayout(self.pred_value_card)
+        pred_layout = QHBoxLayout(self.pred_value_card)
         pred_layout.setAlignment(Qt.AlignCenter)
-        
-        self.pred_value_label = QLabel("-- MW")
-        self.pred_value_label.setStyleSheet(
-            "font-size: 36px; font-weight: bold; color: #2e7d32; background: transparent;")
-        self.pred_value_label.setAlignment(Qt.AlignCenter)
-        pred_layout.addWidget(self.pred_value_label)
+        pred_layout.setSpacing(6)
+        pred_layout.setContentsMargins(8, 4, 8, 4)
         
         self.pred_desc_label = QLabel("等待预测...")
         self.pred_desc_label.setStyleSheet(
-            "font-size: 14px; color: #78909c; background: transparent;")
-        self.pred_desc_label.setAlignment(Qt.AlignCenter)
+            "font-size: 14px; color: #78909c;")
+        self.pred_desc_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         pred_layout.addWidget(self.pred_desc_label)
+        
+        self.pred_value_label = QLabel("-- MW")
+        self.pred_value_label.setStyleSheet(
+            "font-size: 36px; font-weight: bold; color: #2e7d32;")
+        self.pred_value_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        pred_layout.addWidget(self.pred_value_label)
         
         right_layout.addWidget(self.pred_value_card, stretch=1)
 
@@ -640,16 +738,68 @@ class EnergyForecastApp(QMainWindow):
         """)
         return card
 
+    def on_scene_changed(self, scene_text):
+        """预测场景切换时，更新可选模型列表和步长选项"""
+        # 更新模型列表
+        self.model_combo.clear()
+        model_map = self._model_maps.get(scene_text, {})
+        self.model_combo.addItems(list(model_map.keys()))
+
+        # 更新步长选项
+        self.steps_combo.clear()
+        steps_options = self._steps_options.get(scene_text, [])
+        self.steps_combo.addItems(steps_options)
+
+        # 控制预测模式和未来气象数据的可见性
+        is_pv = scene_text == "光伏功率预测"
+        self.mode_label.setVisible(is_pv)
+        self.mode_combo.setVisible(is_pv)
+        # 未来气象数据默认隐藏，由 on_mode_changed 控制
+        self._update_future_weather_visibility()
+
+    def on_mode_changed(self, mode_text):
+        """预测模式切换时，控制未来气象数据文件选择的可见性"""
+        self._update_future_weather_visibility()
+
+    def _update_future_weather_visibility(self):
+        """根据场景和模式决定是否显示未来气象数据输入"""
+        is_pv = self.type_combo.currentText() == "光伏功率预测"
+        is_with_future = "有未来气象数据" in self.mode_combo.currentText()
+        show = is_pv and is_with_future
+        self.future_weather_label.setVisible(show)
+        self.future_weather_input.setVisible(show)
+        self.future_browse_btn.setVisible(show)
+
+    def load_future_weather_file(self):
+        """选择未来气象数据文件"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, 
+            "选择未来气象数据文件", 
+            "", 
+            "数据文件 (*.csv *.xlsx *.xls);;CSV Files (*.csv);;Excel Files (*.xlsx *.xls);;All Files (*)"
+        )
+        if file_path:
+            self.future_weather_input.setText(file_path)
+            ext = os.path.splitext(file_path)[1].upper()
+            self.append_log(f"已装载{ext}格式未来气象数据：{file_path}")
+
     def append_log(self, text):
         self.log_output.append(f"⚡ {text}")
         scrollbar = self.log_output.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
     def load_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV Files (*.csv);;All Files (*)")
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, 
+            "选择历史数据文件", 
+            "", 
+            "数据文件 (*.csv *.xlsx *.xls);;CSV Files (*.csv);;Excel Files (*.xlsx *.xls);;All Files (*)"
+        )
         if file_path:
             self.file_input.setText(file_path)
-            self.append_log(f"已装载历史数据：{file_path}")
+            # 显示文件格式
+            ext = os.path.splitext(file_path)[1].upper()
+            self.append_log(f"已装载{ext}格式历史数据：{file_path}")
 
     def run_prediction(self):
         file_path = self.file_input.text()
@@ -658,34 +808,70 @@ class EnergyForecastApp(QMainWindow):
             return
 
         energy_type = self.type_combo.currentText()
-        if "风电" not in energy_type:
-            QMessageBox.information(self, "提示", f"当前 V0.6 版本专注【风电功率预测】，{energy_type} 敬请期待！")
+        if energy_type == "电网负荷预测（后续更新）":
+            QMessageBox.information(self, "提示", "电网负荷预测功能敬请期待！")
+            return
+
+        # 获取当前场景的模型映射
+        model_map = self._model_maps.get(energy_type, {})
+        if not model_map:
+            QMessageBox.warning(self, "提示", f"当前场景 [{energy_type}] 暂无可用模型！")
             return
 
         display_model = self.model_combo.currentText()
-        backend_model_name = self.model_map.get(display_model)
-        
-        # 🔧 修改：根据新的选项映射步数
+        backend_model_name = model_map.get(display_model)
+        if not backend_model_name:
+            QMessageBox.warning(self, "提示", "请选择一个算法模型！")
+            return
+
+        # 解析预测模式
+        mode_text = self.mode_combo.currentText()
+        if "自动" in mode_text:
+            mode = "auto"
+        elif "有未来" in mode_text:
+            mode = "with_future"
+        else:
+            mode = "without_future"
+
+        # 校验：with_future 模式必须提供未来气象数据
+        future_weather_path = None
+        if mode == "with_future":
+            future_weather_path = self.future_weather_input.text()
+            if not future_weather_path:
+                QMessageBox.warning(self, "提示", "当前为【有未来气象数据】模式，请先选择未来气象数据文件！")
+                return
+                        
+            # 🔧 验证未来气象数据文件格式
+            future_ext = os.path.splitext(future_weather_path)[1].lower()
+            if future_ext not in ['.csv', '.xlsx', '.xls']:
+                QMessageBox.warning(self, "提示", f"未来气象数据文件格式不支持: {future_ext}。仅支持 .csv 和 .xlsx 格式。")
+                return
+
+        # 🔧 修改：根据场景和步长选项映射步数
         steps_text = self.steps_combo.currentText()
-        if "单步" in steps_text:
+        # 从选项文本中提取步数，格式如 "一小时（4 步）"
+        import re
+        match = re.search(r'（(\d+)\s*步）', steps_text)
+        if match:
+            steps = int(match.group(1))
+        elif "单步" in steps_text:
             steps = 1
-        elif "4 步" in steps_text:
-            steps = 4
-        elif "8 步" in steps_text:
-            steps = 8
-        elif "16 步" in steps_text:
-            steps = 16
         else:
             steps = 1
+            self.append_log("⚠️ 未知步长选项，默认使用单步预测")
 
         self.start_btn.setEnabled(False)
         self.start_btn.setText("⏳ 模型推理中...")
         self.progress_bar.show()
         self.progress_bar.setValue(0)
         self.append_log("-" * 40)
-        self.append_log(f"启动新任务：{display_model} (预测步长：{steps})")
+        mode_desc = f"模式: {mode}" if energy_type == "光伏功率预测" else ""
+        self.append_log(f"启动新任务：{display_model} (预测步长：{steps}) {mode_desc}")
 
-        self.worker = PredictionWorker(self.forecast_service, file_path, backend_model_name, steps)
+        self.worker = PredictionWorker(
+            self.forecast_service, file_path, backend_model_name, steps,
+            mode=mode, future_weather_path=future_weather_path
+        )
         self.worker.progress.connect(self.update_progress)
         self.worker.finished.connect(self.on_prediction_success)
         self.worker.error.connect(self.on_prediction_error)
@@ -719,6 +905,9 @@ class EnergyForecastApp(QMainWindow):
         elif "predictions" in result:
             # 多步预测
             vals = result["predictions"]
+            # 兼容嵌套列表格式: [[0.37, 0.46, ...]] -> [0.37, 0.46, ...]
+            if isinstance(vals, list) and len(vals) > 0 and isinstance(vals[0], list):
+                vals = [v for sublist in vals for v in sublist]
             avg_val = sum(vals) / len(vals)
             
             # 计算时间跨度描述
@@ -727,8 +916,6 @@ class EnergyForecastApp(QMainWindow):
                 time_desc = "未来 1 小时平均预测功率"
             elif steps == 8:
                 time_desc = "未来 2 小时平均预测功率"
-            elif steps == 16:
-                time_desc = "未来 4 小时平均预测功率"
             else:
                 time_desc = f"未来{steps}步平均预测功率"
             
@@ -746,6 +933,10 @@ class EnergyForecastApp(QMainWindow):
             # 绘制多点折线图
             self.plot_prediction(vals, f"{steps}步滚动预测序列")
             self.append_log(f"详细多步序列：{[round(v, 2) for v in vals]}")
+        
+        # 🔧 新增：记录使用的模型和步长信息
+        model_info = result.get("model_name", "未知模型")
+        self.append_log(f"✓ 预测完成 | 模型: {model_info} | 步长: {result.get('steps', 1)}")
 
         QMessageBox.information(self, "成功", "预测任务已成功完成！")
 
@@ -806,9 +997,6 @@ class EnergyForecastApp(QMainWindow):
         self.progress_bar.hide()
         self.append_log(f"[异常终止] {err_msg}")
         QMessageBox.critical(self, "预测失败", f"计算错误:\n\n{err_msg}")
-        self.chart_frame.setText("预测中断，请检查数据异常。")
-        self.chart_frame.setStyleSheet(
-            "background-color: #ffebee; border: 2px solid #f44336; border-radius: 12px; font-size: 20px; color: #c62828;")
 
     def reset_ui_state(self):
         self.start_btn.setEnabled(True)
@@ -827,29 +1015,22 @@ class EnergyForecastApp(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
-    # 设置应用图标（后续替换）
-    app.setWindowIcon(QIcon("./res/icon.png"))
+    # 设置应用图标（使用资源路径工具）
+    icon_path = resource_path('./res/icon.png')
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
 
     window = EnergyForecastApp()
 
-#======================================================================
-    # 应用代表“清洁能源与自然生态”的现代渐变背景
-    # window.setStyleSheet("""
-    #     QMainWindow {
-    #         background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-    #             stop:0 #00b4db, stop:0.5 #0083b0, stop:1 #005c97); /* 深空蓝向青绿渐变 */
-    #     }
-    # """)
-
-    # 方式 2: 使用背景图片（取消下面的注释并替换路径）
-    window.setStyleSheet(f"""
-        QMainWindow {{
-            background-image: url('./res/background.png');
-            background-position: center;
-            background-repeat: no-repeat;
-            background-size: cover;
-        }}
-    """)
+    # 使用背景图片（使用资源路径工具）
+    bg_path = resource_path('./res/background.png')
+    if os.path.exists(bg_path):
+        # 🔧 关键修复：使用 border-image 代替 background-image，它能更好地处理拉伸和路径
+        window.setStyleSheet(f"""
+            QMainWindow {{
+                border-image: url('{bg_path}') 0 0 0 0 stretch stretch;
+            }}
+        """)
     # import os
     #
     # script_dir = os.path.dirname(os.path.abspath(__file__))
