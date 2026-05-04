@@ -57,6 +57,17 @@ def add_lag_and_rolling_features(df, power_lags=[4, 12, 24], weather_lags=[4], r
     return df_feat
 
 def run_feature_optimization_pipeline(input_path, output_dir="processed_data"):
+    """
+    光伏预测特征工程流程（Boruta + PCA）
+    
+    📌 重要说明：
+    此脚本生成的 model_ready_data.pkl 被两个训练流程共用：
+    1. PV_part2.py（有未来气象数据版本）- 解码器使用真实未来PCA特征
+    2. PV_part2_no_weather_prediction.py（无未来气象数据版本）- 解码器未来部分零填充
+    
+    特征工程本身不涉及未来数据，所有特征均基于历史观测值计算，因此可以安全复用。
+    两个版本的差异仅在 data_loader 层的解码器输入构造策略。
+    """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 

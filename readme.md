@@ -41,7 +41,7 @@ python nrbo_tuner.py
 
 ---
 
-## 📁 项目结构
+## 📁 项目结构（训练时的结构）
 
 ```
 APredict/

@@ -315,6 +315,115 @@ class PV_TCN_Informer_Predictor:
             return {"success": False, "error": str(e)}
 
 
+class PV_TCN_Informer_NoWeather_Predictor:
+    """
+    光伏TCN-Informer预测器 - 无未来气象数据版本
+    专用于没有天气预报数据的场景，使用零填充策略
+    
+    资产结构：
+    - 预处理器: assets/pv_tcn_informer/preprocessors/pv_preprocessor_no_weather_prediction.py
+    - 模型文件: assets/pv_tcn_informer/assets_no_weather/best_tcn_informer_no_weather_prediction.pth
+    - Bundle文件: assets/pv_tcn_informer/assets_no_weather/preprocessor_bundle.pkl
+    """
+    def __init__(self, model_dir=None):
+        """
+        初始化无未来数据版本的光伏预测器
+        :param model_dir: 模型资产目录路径 (默认: assets/pv_tcn_informer/)
+        """
+        # 导入无未来气象数据版本的预处理器
+        from assets.pv_tcn_informer.preprocessors.pv_preprocessor_no_weather_prediction import PV_Preprocessor_NoWeather
+        from assets.pv_tcn_informer.models import PV_ModelWrapper
+        
+        # 默认使用统一的pv_tcn_informer目录
+        if model_dir is None:
+            model_dir = os.path.join(os.path.dirname(__file__), "assets", "pv_tcn_informer")
+        
+        self.model_dir = model_dir
+        
+        # 无未来数据版本的资产子目录
+        asset_dir = os.path.join(model_dir, "assets_no_weather")
+        
+        # 初始化专用预处理器（零填充策略）
+        self.preprocessor = PV_Preprocessor_NoWeather(asset_dir)
+        
+        # 初始化模型包装器（加载无未来数据版本的模型）
+        self.model_wrapper = PV_ModelWrapper(
+            asset_dir, 
+            input_dim=11, 
+            model_filename="best_tcn_informer_no_weather_prediction.pth"
+        )
+        
+        # 加载scaler_y用于反归一化
+        self.scaler_y = self.preprocessor.scaler_y
+        
+        print(f"[✓] 光伏TCN-Informer无未来数据预测器初始化成功")
+    
+    def predict(self, df: pd.DataFrame, steps: int = 1) -> dict:
+        """
+        无未来数据模式的预测接口
+        :param df: 历史数据DataFrame(至少192行,每行15分钟,必须包含32个特征列)
+        :param steps: 预测步长(1-24),每个步长代表15分钟
+        :return: 预测结果字典
+        """
+        try:
+            # 验证步长范围
+            if steps < 1 or steps > self.model_wrapper.max_pred_len:
+                return {"success": False, "error": f"预测步长必须在1-{self.model_wrapper.max_pred_len}之间"}
+            
+            # 1. 预处理历史数据
+            pca_history, time_history, last_timestamp = self.preprocessor.transform(df)  # [192, 11], [192, 5], Timestamp
+            
+            # 2. 构建解码器输入的未来部分（零填充）
+            pca_future = self.preprocessor.approximate_future_without_weather(df, pred_len=24)  # [24, 11] 零矩阵
+            
+            # 3. 构建Informer所需的四种输入
+            seq_x = torch.FloatTensor(pca_history).unsqueeze(0)  # [1, 192, 11]
+            seq_x_mark = torch.FloatTensor(time_history).unsqueeze(0)  # [1, 192, 5]
+            
+            # 生成未来时间标记
+            time_future = self.preprocessor.generate_future_time_features(last_timestamp, pred_len=24)  # [24, 5]
+            time_full = np.vstack([time_history, time_future])  # [216, 5]
+            
+            # 拼接PCA特征（历史 + 零填充未来）
+            pca_full = np.vstack([pca_history, pca_future])  # [216, 11]
+            
+            # 解码器输入: 后96步历史 + 前24步零填充
+            dec_start_idx = 192 - 96  # 96
+            dec_x = torch.FloatTensor(pca_full[dec_start_idx:]).unsqueeze(0)  # [1, 120, 11]
+            dec_x_mark = torch.FloatTensor(time_full[dec_start_idx:]).unsqueeze(0)  # [1, 120, 5]
+            
+            # 4. 模型推理
+            pred_scaled = self.model_wrapper.predict(seq_x, seq_x_mark, dec_x, dec_x_mark, steps)
+            
+            # 5. 反归一化
+            preds_inverse = np.zeros_like(pred_scaled)
+            for col in range(steps):
+                col_data = pred_scaled[:, col].reshape(-1, 1)  # [1, 1]
+                preds_inverse[:, col] = self.scaler_y.inverse_transform(col_data).flatten()
+            
+            # 6. 应用物理约束
+            MAX_CAPACITY = 130.0  # MW
+            night_mask = (preds_inverse < 0.05)
+            preds_inverse[night_mask] = 0.0
+            preds_inverse = np.maximum(0, preds_inverse)
+            preds_inverse = np.minimum(preds_inverse, MAX_CAPACITY)
+            
+            predictions = preds_inverse[0].tolist()
+            
+            return {
+                "success": True,
+                "predictions": predictions,
+                "steps": steps,
+                "model_name": "PV_TCN_Informer_NoWeather",
+                "mode": "without_future_zero_padding"
+            }
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return {"success": False, "error": str(e)}
+
+
 class CNN_LSTM_Attention_Predictor:
     def __init__(self, model_dir):
         # self.scaler_x = load(os.path.join(model_dir, "scaler_x"))
@@ -344,7 +453,8 @@ class ForecastService:
         # ★ 注册表：将 "GUI传入的名字" 映射到 -> (类名, "该模型专属的子文件夹名")
         self._model_registry = {
             "CEEMDAN_LGBM_Transformer": (CEEMDAN_LGBM_Transformer_Predictor, "wind_ceemdan_lgbm_trans"),
-            "PV_TCN_Informer": (PV_TCN_Informer_Predictor, "pv_tcn_informer"),  # 新增光伏预测器
+            "PV_TCN_Informer": (PV_TCN_Informer_Predictor, "pv_tcn_informer"),  # 有未来气象数据版本
+            "PV_TCN_Informer_NoWeather": (PV_TCN_Informer_NoWeather_Predictor, "pv_tcn_informer"),  # 无未来气象数据版本（共用同一目录）
 
             # TODO：后续加上这几种算法
             # "CNN-LSTM-Attention": (CNN_LSTM_Attention_Predictor, "wind_cnn_lstm_att"),
