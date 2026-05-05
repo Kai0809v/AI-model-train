@@ -31,8 +31,14 @@ def resource_path(relative_path):
     return os.path.join(os.path.abspath("."), relative_path)
 
 # 🔧 修复 PyTorch 2.6 的 weights_only 安全限制
-# 允许加载包含 numpy 标量的模型文件
-torch.serialization.add_safe_globals([np._core.multiarray.scalar])
+# 注意：np._core.multiarray.scalar 不能直接传递给 add_safe_globals
+# 如果需要加载模型，会在模型加载时动态处理
+try:
+    import numpy as np
+    if hasattr(np._core, 'multiarray') and hasattr(np._core.multiarray, 'scalar'):
+        torch.serialization.add_safe_globals([np._core.multiarray.scalar])
+except Exception:
+    pass
 
 
 # ============================================

@@ -22,24 +22,27 @@ def resource_path(relative_path):
     path = os.path.join(base, relative_path).replace('\\', '/')
     return path
 
-# ============================================
-# 资源路径处理工具（解决打包后路径失效问题）
-# ============================================
-def resource_path(relative_path):
-    """获取资源的绝对路径，兼容开发环境和 PyInstaller 打包环境"""
-    if hasattr(sys, '_MEIPASS'):
-        base = sys._MEIPASS
-    else:
-        base = os.path.abspath(".")
-    
-    # 🔧 将 Windows 的反斜杠 \ 替换为正斜杠 /，因为 Qt 样式表只认 /
-    path = os.path.join(base, relative_path).replace('\\', '/')
-    return path
+# 导入配置常量
+from gui_config import (
+    APP_NAME, APP_VERSION, APP_DESCRIPTION,
+    MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT,
+    ANALYSIS_WINDOW_WIDTH, ANALYSIS_WINDOW_HEIGHT,
+    PREDICTION_SCENARIOS,
+    FILE_FILTER_STRING,
+    PV_POWER_COLUMNS, WIND_POWER_COLUMNS, TIME_COLUMNS,
+    COLOR_PRIMARY, COLOR_PRIMARY_HOVER, COLOR_SECONDARY,
+    COLOR_BG_CARD, COLOR_BG_LOG, COLOR_TEXT_SUCCESS,
+    CHART_MIN_WIDTH, CHART_MIN_HEIGHT,
+    ICON_PATH, BACKGROUND_PATH
+)
 
-# 导入预测服务接口
-from api_v6 import ForecastService
-# 机器学习小组
-MLG_VERSION = "V1.6" 
+# 导入解耦模块
+from prediction_controller import PredictionController
+from chart_renderer import ChartRenderer
+from data_loader_module import DataLoader 
+
+# 应用版本
+MLG_VERSION = APP_VERSION
 
 # ============================================
 # 登录页面
@@ -372,11 +375,11 @@ class PredictionWorker(QThread):
     finished = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, service, file_path, model_name, steps=1, mode="auto", future_weather_path=None):
+    def __init__(self, controller, file_path, model_backend_name, steps=1, mode="auto", future_weather_path=None):
         super().__init__()
-        self.service = service
+        self.controller = controller
         self.file_path = file_path
-        self.model_name = model_name
+        self.model_backend_name = model_backend_name
         self.steps = steps
         self.mode = mode
         self.future_weather_path = future_weather_path
@@ -385,80 +388,25 @@ class PredictionWorker(QThread):
         try:
             self.progress.emit(10, "正在读取历史数据...")
             
-            # 🔧 智能识别文件格式并读取
-            file_ext = os.path.splitext(self.file_path)[1].lower()
-            try:
-                if file_ext == '.csv':
-                    df = pd.read_csv(self.file_path)
-                    self.progress.emit(15, f"已读取CSV文件: {os.path.basename(self.file_path)}")
-                elif file_ext in ['.xlsx', '.xls']:
-                    df = pd.read_excel(self.file_path, engine='openpyxl' if file_ext == '.xlsx' else None)
-                    self.progress.emit(15, f"已读取Excel文件: {os.path.basename(self.file_path)}")
-                else:
-                    self.error.emit(f"不支持的文件格式: {file_ext}。仅支持 .csv 和 .xlsx 格式。")
-                    return
-            except Exception as e:
-                self.error.emit(f"文件读取失败，请检查文件格式是否正确。\n详情：{str(e)}")
-                return
-
-            # 🔧 新增：数据质量检查与清洗
-            original_rows = len(df)
-            
-            # 1. 删除全是 NaN 的空白行（处理 CSV/Excel 中可能的空行）
-            df = df.dropna(how='all').reset_index(drop=True)
-            cleaned_rows = len(df)
-            
-            if cleaned_rows < original_rows:
-                print(f"⚠️ 检测到 {original_rows - cleaned_rows} 行空白数据，已自动清除")
-            
-            # 2. 检查是否有部分缺失值的列
-            nan_summary = df.isnull().sum()
-            cols_with_nan = nan_summary[nan_summary > 0]
-            
-            if len(cols_with_nan) > 0:
-                print(f"⚠️ 以下列存在缺失值，将进行修复:\n{cols_with_nan.to_string()}")
-                
-                # 对关键特征列进行填充修复
-                critical_cols = [
-                    '测风塔 10m 风速 (m/s)', '测风塔 30m 风速 (m/s)', '测风塔 50m 风速 (m/s)',
-                    '测风塔 70m 风速 (m/s)', '轮毂高度风速 (m/s)', '测风塔 10m 风向 (°)',
-                    '测风塔 30m 风向 (°)', '测风塔 50m 风向 (°)', '测风塔 70m 风向 (°)',
-                    '轮毂高度风向 (°)', '温度 (°)', '气压 (hPa)', '湿度 (%)',
-                    '实际发电功率（mw）',
-                    # 光伏特征列
-                    'TSI', 'DNI', 'GHI', 'Temp', 'Atmosphere', 'Humidity',
-                ]
-                
-                available_cols = [col for col in critical_cols if col in df.columns]
-                df[available_cols] = df[available_cols].ffill().bfill()
-                
-                # 如果还有 NaN，用均值填补
-                for col in available_cols:
-                    if df[col].isnull().any():
-                        df[col].fillna(df[col].mean(), inplace=True)
-                
-            # 3. 最终检查：确保有足够的有效数据
-            min_rows = 192 if self.model_name in ["PV_TCN_Informer", "PV_TCN_Informer_NoWeather"] else 96
-            if len(df) < min_rows:
-                self.error.emit(f"❌ 数据量不足！删除空白行后仅剩 {len(df)} 行有效数据，{self.model_name} 模型需要至少 {min_rows} 行。")
-                return
-            
-            self.progress.emit(30, f"数据校验通过，有效数据共 {len(df)} 行。正在加载模型...")
-            self.progress.emit(50, f"正在加载模型 [{self.model_name}]...")
+            # 调用控制器执行完整预测流程
+            self.progress.emit(30, "数据校验通过。正在加载模型...")
+            self.progress.emit(50, f"正在加载模型 [{self.model_backend_name}]...")
             self.progress.emit(70, "模型就绪，正在执行核心预测算法...")
 
             # 🔧 构建额外参数
             kwargs = {}
-            if self.model_name == "PV_TCN_Informer":
-                # 只有有未来数据版本才需要mode参数
+            if self.model_backend_name == "PV_TCN_Informer":
                 kwargs["mode"] = self.mode
                 if self.mode == "with_future" and self.future_weather_path:
                     self.progress.emit(75, "正在加载未来气象数据...")
-                    future_df = pd.read_csv(self.future_weather_path)
-                    kwargs["future_weather_df"] = future_df
-            # PV_TCN_Informer_NoWeather 不需要任何额外参数
 
-            result = self.service.run(self.model_name, df, self.steps, **kwargs)
+            result = self.controller.execute_prediction(
+                self.file_path,
+                self.model_backend_name,
+                self.steps,
+                mode=self.mode,
+                future_weather_path=self.future_weather_path
+            )
 
             if result.get("success"):
                 self.progress.emit(100, "✅ 预测计算完成！")
@@ -478,11 +426,15 @@ class EnergyForecastApp(QMainWindow):
     def __init__(self):
         super().__init__()
         # 调整了窗口尺寸，高度不再过于冗长
-        self.setWindowTitle(f"综合能源预测系统 {MLG_VERSION}")
-        self.resize(1000, 600)
+        self.setWindowTitle(f"{APP_NAME} {MLG_VERSION}")
+        self.resize(MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT)
 
         self.current_username = None
-        self.forecast_service = ForecastService()
+        # 使用解耦的控制器
+        self.controller = PredictionController()
+        # 图表渲染器
+        self.chart_renderer = ChartRenderer()
+        self.data_loader = DataLoader()
         self.init_ui()
 
     def init_ui(self):
@@ -615,31 +567,7 @@ class EnergyForecastApp(QMainWindow):
         left_layout.addWidget(self.steps_combo)
 
         # 初始化场景（触发模型列表和步长更新）
-        self._model_maps = {
-            "风电功率预测": {
-                "CEEMDAN-LGBM-Transformer": "CEEMDAN_LGBM_Transformer",
-            },
-            "光伏功率预测": {
-                "BP-TCN-Informer（有未来气象数据）": "PV_TCN_Informer",
-                "BP-TCN-Informer（无未来气象数据）": "PV_TCN_Informer_NoWeather",
-            },
-            "电网负荷预测（后续更新）": {},
-        }
-        self._steps_options = {
-            "风电功率预测": [
-                "下一时刻（单步）",
-                "一小时（4 步）",
-                "两小时（8 步）"
-            ],
-            "光伏功率预测": [
-                "下一时刻（1 步）",
-                "一小时（4 步）",
-                "两小时（8 步）",
-                "三小时（12 步）",
-                "六小时（24 步）",
-            ],
-            "电网负荷预测（后续更新）": [],
-        }
+        # 从配置常量动态加载，而非硬编码
         self.on_scene_changed(self.type_combo.currentText())
 
         left_layout.addStretch()
@@ -773,14 +701,14 @@ class EnergyForecastApp(QMainWindow):
 
     def on_scene_changed(self, scene_text):
         """预测场景切换时，更新可选模型列表和步长选项"""
-        # 更新模型列表
+        # 从控制器获取模型列表
         self.model_combo.clear()
-        model_map = self._model_maps.get(scene_text, {})
+        model_map = self.controller.get_models_for_scenario(scene_text)
         self.model_combo.addItems(list(model_map.keys()))
 
-        # 更新步长选项
+        # 从控制器获取步长选项
         self.steps_combo.clear()
-        steps_options = self._steps_options.get(scene_text, [])
+        steps_options = self.controller.get_steps_options_for_scenario(scene_text)
         self.steps_combo.addItems(steps_options)
 
         # 控制未来气象数据的可见性（根据选择的模型）
@@ -829,13 +757,13 @@ class EnergyForecastApp(QMainWindow):
             self, 
             "选择历史数据文件", 
             "", 
-            "数据文件 (*.csv *.xlsx *.xls);;CSV Files (*.csv);;Excel Files (*.xlsx *.xls);;All Files (*)"
+            FILE_FILTER_STRING
         )
         if file_path:
             self.file_input.setText(file_path)
             # 显示文件格式
-            ext = os.path.splitext(file_path)[1].upper()
-            self.append_log(f"已装载{ext}格式历史数据：{file_path}")
+            format_desc = self.data_loader.get_file_format_description(file_path)
+            self.append_log(f"已装载{format_desc}格式历史数据：{file_path}")
 
     def run_prediction(self):
         file_path = self.file_input.text()
@@ -848,8 +776,8 @@ class EnergyForecastApp(QMainWindow):
             QMessageBox.information(self, "提示", "电网负荷预测功能敬请期待！")
             return
 
-        # 获取当前场景的模型映射
-        model_map = self._model_maps.get(energy_type, {})
+        # 从控制器获取当前场景的模型映射
+        model_map = self.controller.get_models_for_scenario(energy_type)
         if not model_map:
             QMessageBox.warning(self, "提示", f"当前场景 [{energy_type}] 暂无可用模型！")
             return
@@ -877,22 +805,15 @@ class EnergyForecastApp(QMainWindow):
                 return
                         
             # 🔧 验证未来气象数据文件格式
-            future_ext = os.path.splitext(future_weather_path)[1].lower()
-            if future_ext not in ['.csv', '.xlsx', '.xls']:
-                QMessageBox.warning(self, "提示", f"未来气象数据文件格式不支持: {future_ext}。仅支持 .csv 和 .xlsx 格式。")
+            is_valid, error_msg = self.controller.validate_future_weather_file(future_weather_path)
+            if not is_valid:
+                QMessageBox.warning(self, "提示", error_msg)
                 return
 
         # 🔧 根据场景和步长选项映射步数
         steps_text = self.steps_combo.currentText()
-        # 从选项文本中提取步数，格式如 "一小时（4 步）"
-        import re
-        match = re.search(r'（(\d+)\s*步）', steps_text)
-        if match:
-            steps = int(match.group(1))
-        elif "单步" in steps_text:
-            steps = 1
-        else:
-            steps = 1
+        steps = self.controller.parse_steps_from_text(steps_text)
+        if steps == 1 and "单步" not in steps_text and "1 步" not in steps_text:
             self.append_log("⚠️ 未知步长选项，默认使用单步预测")
 
         self.start_btn.setEnabled(False)
@@ -904,7 +825,7 @@ class EnergyForecastApp(QMainWindow):
         self.append_log(f"启动新任务：{display_model} (预测步长：{steps}) {mode_desc}")
 
         self.worker = PredictionWorker(
-            self.forecast_service, file_path, backend_model_name, steps,
+            self.controller, file_path, backend_model_name, steps,
             mode=mode, future_weather_path=future_weather_path
         )
         self.worker.progress.connect(self.update_progress)
@@ -977,86 +898,27 @@ class EnergyForecastApp(QMainWindow):
 
     # 🔧 新增：Matplotlib 绘图方法
     def plot_prediction(self, values, title):
-        """绘制预测结果的折线图"""
-        # 🚀 延迟加载 Matplotlib
-        if not self._matplotlib_imported:
-            from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-            from matplotlib.figure import Figure
-            from matplotlib import rcParams
-            
-            # 🔧 配置中文字体和负号显示
-            rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei']
-            rcParams['axes.unicode_minus'] = False
-            
-            self.figure = Figure(figsize=(8, 6), dpi=100, facecolor='#ffffff')
-            self.canvas = FigureCanvas(self.figure)
-            self.canvas.setStyleSheet("""
-                background-color: rgba(255, 255, 255, 0.95); 
-                border: 2px solid #b2dfdb; 
-                border-radius: 12px;
-            """)
-            self.canvas.setMinimumSize(600, 400)
-            
-            # 替换占位符
-            # 找到右侧面板的布局
-            for child in self.main_widget.findChildren(QWidget):
-                if hasattr(child, 'layout'):
-                    layout = child.layout()
-                    if layout and layout.count() > 0:
-                        # 检查是否包含占位符
-                        for i in range(layout.count()):
-                            item = layout.itemAt(i)
-                            if item.widget() == self.placeholder_widget:
-                                # 在占位符的位置插入画布（保持标题在上方）
-                                layout.removeWidget(self.placeholder_widget)
-                                self.placeholder_widget.deleteLater()
-                                layout.insertWidget(i, self.canvas, 3)  # 在原来占位符的位置插入
-                                break
-            
-            self._matplotlib_imported = True
+        """绘制预测结果的折线图（委托给ChartRenderer）"""
+        canvas = self.chart_renderer.create_prediction_chart(values, title)
         
-        self.figure.clear()
+        # 如果是首次调用，需要将canvas嵌入到界面中
+        if not self.chart_renderer.is_initialized():
+            return
         
-        ax = self.figure.add_subplot(111)
-        
-        # 生成 x 轴（时间点）
-        x = list(range(1, len(values) + 1))
-        
-        # 绘制折线图
-        if len(values) == 1:
-            # 单步预测：用柱状图
-            bars = ax.bar(x, values, color='#4caf50', alpha=0.7, edgecolor='#2e7d32', linewidth=2)
-            ax.set_xticks(x)
-            ax.set_xticklabels(['下一时刻'])
-        else:
-            # 多步预测：用折线图
-            ax.plot(x, values, marker='o', linestyle='-', color='#00897b', 
-                   linewidth=2, markersize=8, markerfacecolor='#ffffff', 
-                   markeredgewidth=2, markeredgecolor='#00897b')
-            ax.fill_between(x, values, alpha=0.3, color='#00897b')
-            
-            # 设置 x 轴标签
-            step_labels = [f'T+{i}' for i in x]
-            ax.set_xticks(x)
-            ax.set_xticklabels(step_labels, rotation=45, ha='right')
-        
-        # 设置标题和标签
-        ax.set_title(title, fontsize=14, fontweight='bold', color='#2c3e50', pad=15)
-        ax.set_xlabel('预测步长', fontsize=11, color='#546e7a', labelpad=10)
-        ax.set_ylabel('功率 (MW)', fontsize=11, color='#546e7a', labelpad=10)
-        
-        # 添加网格
-        ax.grid(True, linestyle='--', alpha=0.6, color='#b0bec5')
-        
-        # 设置背景色
-        ax.set_facecolor('#f5f5f5')
-        self.figure.patch.set_facecolor('#ffffff')
-        
-        # 调整布局（增加边距确保标签完整显示）
-        self.figure.tight_layout(pad=2.0, rect=[0, 0.05, 1, 0.95])
-        
-        # 刷新画布
-        self.canvas.draw()
+        # 替换占位符
+        for child in self.main_widget.findChildren(QWidget):
+            if hasattr(child, 'layout'):
+                layout = child.layout()
+                if layout and layout.count() > 0:
+                    # 检查是否包含占位符
+                    for i in range(layout.count()):
+                        item = layout.itemAt(i)
+                        if item.widget() == self.placeholder_widget:
+                            # 在占位符的位置插入画布（保持标题在上方）
+                            layout.removeWidget(self.placeholder_widget)
+                            self.placeholder_widget.deleteLater()
+                            layout.insertWidget(i, canvas, 3)  # 在原来占位符的位置插入
+                            break
 
     def on_prediction_error(self, err_msg):
         self.reset_ui_state()
@@ -1102,16 +964,14 @@ class DataAnalysisWindow(QMainWindow):
     def __init__(self, init_scene="光伏功率预测", init_data_path=""):
         super().__init__()
         self.setWindowTitle("📊 历史光伏/风电数据分析")
-        self.resize(1200, 800) # 设计方案要求尺寸
+        self.resize(ANALYSIS_WINDOW_WIDTH, ANALYSIS_WINDOW_HEIGHT) # 设计方案要求尺寸
         
-        # 🚀 延迟加载：仅在需要时导入 Matplotlib
-        self.figure = None
-        self.canvas = None
-        self.ax_time_series = None
-        self.ax_peak = None
+        # 🚀 使用解耦的ChartRenderer
+        self.chart_renderer = ChartRenderer()
         self.df_loaded = None
         self.current_scene = init_scene
         self.current_data_path = init_data_path  # 保存当前数据路径
+        self.data_loader = DataLoader()  # 使用解耦的数据加载器
         
         # 🎨 设置背景图片
         bg_path = resource_path('./res/background.png')
@@ -1127,434 +987,578 @@ class DataAnalysisWindow(QMainWindow):
         self.init_ui(init_scene, init_data_path)
 
     def init_ui(self, init_scene, init_data_path):
-        # 🎨 顶部控制栏 (通栏)
+        # 🎨 顶部控制栏
         top_bar = QFrame()
-        top_bar.setFixedHeight(80)
         top_bar.setStyleSheet("""
-            QFrame { 
-                background-color: rgba(255, 255, 255, 0.95); 
+            QFrame {
+                background-color: rgba(255, 255, 255, 0.98); 
                 border-bottom: 2px solid #4caf50;
                 border-radius: 8px;
                 margin: 10px;
             }
         """)
         top_layout = QHBoxLayout(top_bar)
-        
-        # 左侧标题
-        title_layout = QVBoxLayout()
-        self.analysis_title_label = QLabel("📊 历史光伏数据分析" if "光伏" in init_scene else "📊 历史风电数据分析")
-        self.analysis_title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #2e7d32;")
-        self.analysis_sub_label = QLabel(f"当前分析数据：{os.path.basename(init_data_path) if init_data_path else '未选择'}")
-        self.analysis_sub_label.setStyleSheet("font-size: 12px; color: #666;")
-        title_layout.addWidget(self.analysis_title_label)
-        title_layout.addWidget(self.analysis_sub_label)
-        
-        # 中间筛选区
-        filter_layout = QHBoxLayout()
-        filter_label = QLabel("📅 日期范围:")
-        self.date_combo = QComboBox()
-        self.date_combo.addItems(["最近1个月", "最近3个月", "全年", "自定义"])
-        
-        #  添加数据粒度选择
+
+        # 🔧 新设计：数据路径显示（最左边）
+        self.data_path_label = QLabel(f"📁 {os.path.basename(init_data_path) if init_data_path else '未选择数据文件'}")
+        self.data_path_label.setStyleSheet("""
+            QLabel {
+                color: #37474f;
+                font-size: 12px;
+                padding: 5px 10px;
+                background-color: #f5f5f5;
+                border-radius: 4px;
+                border: 1px solid #e0e0e0;
+            }
+        """)
+        self.data_path_label.setMinimumWidth(300)
+        top_layout.addWidget(self.data_path_label)
+
+        # 🔧 新设计：数据粒度选择器
         granularity_label = QLabel("⏱️ 数据粒度:")
+        granularity_label.setStyleSheet("color: #546e7a; font-size: 12px; margin-left: 10px;")
+
         self.granularity_combo = QComboBox()
         self.granularity_combo.addItems(["15分钟", "30分钟", "1小时", "5分钟"])
         self.granularity_combo.setCurrentText("15分钟")  # 默认15分钟
+        # 🔧 设置字体避免警告
+        from PySide6.QtGui import QFont
+        font = QFont()
+        font.setPointSize(12)
+        self.granularity_combo.setFont(font)
+        
         self.granularity_combo.setStyleSheet("""
             QComboBox {
                 padding: 5px 10px; 
                 background-color: white; 
                 border: 1px solid #cfd8dc;
                 border-radius: 4px;
-                font-size: 12px;
+                min-width: 100px;
             }
         """)
-        
-        # 🔄 添加数据选择按钮
-        select_data_btn = QPushButton("📂 选择数据文件")
-        select_data_btn.setStyleSheet("""
+
+        top_layout.addWidget(granularity_label)
+        top_layout.addWidget(self.granularity_combo)
+
+        # 🔧 新设计：开始分析按钮
+        start_analysis_btn = QPushButton("▶️ 开始分析")
+        start_analysis_btn.setStyleSheet("""
             QPushButton {
-                padding: 5px 10px; 
-                background-color: #00897b; 
-                color: white; 
+                padding: 6px 20px;
+                background-color: #1976d2;
+                color: white;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 13px;
+                margin-left: 10px;
+            }
+            QPushButton:hover { background-color: #1565c0; }
+            QPushButton:pressed { background-color: #0d47a1; }
+        """)
+        start_analysis_btn.clicked.connect(self.start_analysis)
+        top_layout.addWidget(start_analysis_btn)
+
+        # 🔧 新设计：导出报告按钮
+        export_btn = QPushButton("📥 导出分析报告")
+        export_btn.setStyleSheet("""
+            QPushButton {
+                padding: 6px 15px;
+                background-color: #2e7d32;
+                color: white;
                 border-radius: 4px;
                 font-size: 12px;
+                margin-left: 10px;
             }
-            QPushButton:hover { background-color: #00796b; }
+            QPushButton:hover { background-color: #388e3c; }
         """)
-        select_data_btn.clicked.connect(self.select_data_file)
-        
-        filter_layout.addWidget(filter_label)
-        filter_layout.addWidget(self.date_combo)
-        filter_layout.addWidget(granularity_label)
-        filter_layout.addWidget(self.granularity_combo)
-        filter_layout.addWidget(select_data_btn)
-        
-        # 右侧操作按钮
-        btn_layout = QHBoxLayout()
-        reset_btn = QPushButton("🔄 重置视图")
-        export_btn = QPushButton("📥 导出分析报告")
-        close_btn = QPushButton("❌ 关闭窗口")
-        
-        for btn in [reset_btn, export_btn, close_btn]:
-            btn.setStyleSheet("""
-                QPushButton {
-                    padding: 5px 10px; 
-                    background-color: #2e7d32; 
-                    color: white; 
-                    border-radius: 4px;
-                    font-size: 12px;
-                }
-                QPushButton:hover { background-color: #388e3c; }
-            """)
-        reset_btn.clicked.connect(self.reset_analysis)
         export_btn.clicked.connect(self.export_report)
-        close_btn.clicked.connect(self.close)
-        btn_layout.addWidget(reset_btn)
-        btn_layout.addWidget(export_btn)
-        btn_layout.addWidget(close_btn)
+        top_layout.addWidget(export_btn)
 
-        top_layout.addLayout(title_layout)
-        top_layout.addLayout(filter_layout)
-        top_layout.addLayout(btn_layout)
-        top_layout.setStretch(0, 1) # 标题区占位
+        top_layout.addStretch()  # 右侧留白
+
+        # 🔧 新设计：进度条
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #cfd8dc;
+                border-radius: 4px;
+                text-align: center;
+                background-color: #f5f5f5;
+                height: 20px;
+            }
+            QProgressBar::chunk {
+                background-color: #1976d2;
+                border-radius: 3px;
+            }
+        """)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(False)  # 初始隐藏
 
         # 主内容区 (左右布局)
         main_content = QFrame()
         main_content.setStyleSheet("QFrame { background: transparent; }")
         main_layout = QHBoxLayout(main_content)
-        
-        # 左侧：时序曲线可视化区 (55%)
-        self.left_panel = self.create_card("📈 时序曲线可视化", "请先选择数据文件并点击'开始分析'")
-        self.left_panel.setMinimumWidth(660) # 1200 * 0.55
-        
-        # 右侧：组合卡片 (45%)
+
+        # 🔧 新设计：左侧图表区域 (60%)
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+
+        # 左侧上方：功率曲线图
+        self.chart_card = QFrame()
+        self.chart_card.setObjectName("ChartCard")
+        self.chart_card.setStyleSheet("""
+            QFrame#ChartCard {
+                background-color: rgba(255, 255, 255, 0.95);
+                border-radius: 12px;
+                border: 1px solid #e0f2f1;
+                padding: 15px;
+            }
+        """)
+        chart_layout = QVBoxLayout(self.chart_card)
+
+        self.chart_title_label = QLabel("功率曲线分析")
+        self.chart_title_label.setObjectName("ChartTitle")
+        self.chart_title_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #1b5e20; margin-bottom: 10px;")
+
+        self.chart_placeholder = QLabel("请选择数据并点击'开始分析'")
+        self.chart_placeholder.setObjectName("ChartPlaceholder")
+        self.chart_placeholder.setAlignment(Qt.AlignCenter)
+        self.chart_placeholder.setStyleSheet("color: #757575; font-size: 13px; padding: 50px;")
+
+        chart_layout.addWidget(self.chart_title_label)
+        chart_layout.addWidget(self.chart_placeholder)
+
+        left_layout.addWidget(self.chart_card)
+
+        # 🔧 新设计：右侧信息面板 (40%)
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
-        
-        # 右上：月度发电峰值分析卡
-        self.peak_analysis_card = self.create_card("🏆 月度发电峰值分析", "等待分析...")
-        
-        # 右下：数据质量诊断卡
-        self.quality_card = self.create_card("⚠️ 数据质量诊断", "等待分析...")
-        
-        right_layout.addWidget(self.peak_analysis_card)
+
+        # 右上：月度日发电峰值
+        self.peak_card = QFrame()
+        self.peak_card.setObjectName("PeakCard")
+        self.peak_card.setStyleSheet("""
+            QFrame#PeakCard {
+                background-color: rgba(255, 255, 255, 0.95);
+                border-radius: 12px;
+                border: 1px solid #e0f2f1;
+                padding: 15px;
+            }
+        """)
+        peak_layout = QVBoxLayout(self.peak_card)
+
+        self.peak_title_label = QLabel("🏆 月度日发电峰值")
+        self.peak_title_label.setObjectName("PeakTitle")
+        self.peak_title_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #1b5e20; margin-bottom: 10px;")
+
+        self.peak_content_label = QLabel("等待分析...")
+        self.peak_content_label.setObjectName("PeakContent")
+        self.peak_content_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.peak_content_label.setStyleSheet("color: #37474f; font-size: 14px; line-height: 1.8;")
+        self.peak_content_label.setWordWrap(True)
+
+        peak_layout.addWidget(self.peak_title_label)
+        peak_layout.addWidget(self.peak_content_label)
+
+        # 右下：数据质量诊断
+        self.quality_card = QFrame()
+        self.quality_card.setObjectName("QualityCard")
+        self.quality_card.setStyleSheet("""
+            QFrame#QualityCard {
+                background-color: rgba(255, 255, 255, 0.95);
+                border-radius: 12px;
+                border: 1px solid #e0f2f1;
+                padding: 15px;
+            }
+        """)
+        quality_layout = QVBoxLayout(self.quality_card)
+
+        self.quality_title_label = QLabel("⚠️ 数据质量诊断")
+        self.quality_title_label.setObjectName("QualityTitle")
+        self.quality_title_label.setStyleSheet(
+            "font-weight: bold; font-size: 14px; color: #1b5e20; margin-bottom: 10px;")
+
+        self.quality_content_label = QLabel("等待分析...")
+        self.quality_content_label.setObjectName("QualityContent")
+        self.quality_content_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.quality_content_label.setStyleSheet("color: #37474f; font-size: 14px;")
+        self.quality_content_label.setWordWrap(True)
+        # 🔧 启用富文本渲染（支持HTML标签和换行）
+        self.quality_content_label.setTextFormat(Qt.RichText)
+
+        quality_layout.addWidget(self.quality_title_label)
+        quality_layout.addWidget(self.quality_content_label)
+
+        right_layout.addWidget(self.peak_card)
         right_layout.addWidget(self.quality_card)
         right_layout.setStretch(0, 1)
         right_layout.setStretch(1, 1)
 
-        main_layout.addWidget(self.left_panel)
-        main_layout.addWidget(right_panel)
+        main_layout.addWidget(left_panel, 3)  # 左侧占60%
+        main_layout.addWidget(right_panel, 2)  # 右侧占40%
 
         # 整体布局组装
         container = QWidget()
         container_layout = QVBoxLayout(container)
         container_layout.addWidget(top_bar)
+        container_layout.addWidget(self.progress_bar)
         container_layout.addWidget(main_content)
         self.setCentralWidget(container)
 
-        # 初始化逻辑
-        self.update_content(init_scene, init_data_path)
-
-    def create_card(self, title, content_text):
-        """通用卡片生成函数"""
-        card = QFrame()
-        card.setStyleSheet("""
-            QFrame {
-                background-color: rgba(255, 255, 255, 0.95);
-                border-radius: 12px;
-                border: 1px solid #e0f2f1;
-                padding: 15px;
-                margin: 5px;
-            }
-        """)
-        layout = QVBoxLayout(card)
-        
-        title_label = QLabel(title)
-        title_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #1b5e20; margin-bottom: 10px;")
-        
-        content_label = QLabel(content_text)
-        content_label.setAlignment(Qt.AlignCenter)
-        content_label.setStyleSheet("color: #757575;")
-        content_label.setWordWrap(True)
-        
-        layout.addWidget(title_label)
-        layout.addWidget(content_label)
-        return card
+        # 初始化逻辑（简化，不再调用update_content）
+        self.current_scene = init_scene
+        self.current_data_path = init_data_path
 
     def select_data_file(self):
         """在分析窗口中选择新的数据文件（不影响主窗口）"""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, 
-            "选择历史数据文件", 
-            "", 
-            "数据文件 (*.csv *.xlsx *.xls);;CSV Files (*.csv);;Excel Files (*.xlsx *.xls);;All Files (*)"
+            self,
+            "选择历史数据文件",
+            "",
+            FILE_FILTER_STRING
         )
         if file_path:
             self.current_data_path = file_path
-            self.analysis_sub_label.setText(f"当前分析数据：{os.path.basename(file_path)}")
+            self.data_path_label.setText(f"📁 {os.path.basename(file_path)}")
             self.statusBar().showMessage(f"已加载: {os.path.basename(file_path)}", 3000)
-            
-            # 自动执行分析
-            self.update_content(self.current_scene, file_path)
-    
-    def update_content(self, scene, data_path):
-        """根据传入的场景和路径更新界面内容"""
-        # 更新标题
-        if "光伏" in scene:
-            self.analysis_title_label.setText("📊 历史光伏数据分析")
-        else:
-            self.analysis_title_label.setText("📊 历史风电数据分析")
-        
-        self.current_scene = scene
-        
-        # 模拟数据加载逻辑
-        if data_path and os.path.exists(data_path):
-            try:
-                # 🔧 智能识别文件格式并读取
-                file_ext = os.path.splitext(data_path)[1].lower()
-                if file_ext == '.csv':
-                    df = pd.read_csv(data_path)
-                elif file_ext in ['.xlsx', '.xls']:
-                    df = pd.read_excel(data_path, engine='openpyxl' if file_ext == '.xlsx' else None)
-                else:
-                    self.statusBar().showMessage(f"不支持的文件格式: {file_ext}", 3000)
-                    return
-                
-                self.df_loaded = df
-                self.analysis_sub_label.setText(f"当前分析数据：{os.path.basename(data_path)} ({len(df)} 条记录)")
-                
-                # 🚀 执行完整分析
-                self.perform_full_analysis(df)
-                
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                self.statusBar().showMessage(f"数据加载失败: {str(e)}", 5000)
-        else:
-            self.statusBar().showMessage("未选择数据文件", 3000)
-    
+
+            # 重置显示状态
+            self.df_loaded = None
+            self.chart_placeholder.setText("✅ 数据已加载，请点击'开始分析'按钮")
+            self.peak_content_label.setText("等待分析...")
+            self.quality_content_label.setText("等待分析...")
+
+    def start_analysis(self):
+        """点击'开始分析'按钮时执行分析"""
+        if not self.current_data_path or not os.path.exists(self.current_data_path):
+            QMessageBox.warning(self, "提示", "请先选择数据文件！")
+            return
+
+        try:
+            # 显示进度条
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setValue(10)
+            self.statusBar().showMessage("正在加载数据...", 2000)
+
+            # 🔧 使用解耦的DataLoader加载数据
+            df = self.data_loader.load_file(self.current_data_path)
+            self.progress_bar.setValue(30)
+
+            self.df_loaded = df
+            self.statusBar().showMessage("正在分析数据...", 2000)
+
+            # 🚀 执行完整分析
+            self.perform_full_analysis(df)
+
+            self.progress_bar.setValue(100)
+            self.statusBar().showMessage("✅ 分析完成！", 3000)
+
+            # 延迟隐藏进度条
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(1000, lambda: self.progress_bar.setVisible(False))
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "分析失败", f"数据分析出错：\n{str(e)}")
+            self.statusBar().showMessage(f"❌ 分析失败: {str(e)}", 5000)
+            self.progress_bar.setVisible(False)
+
     def perform_full_analysis(self, df):
         """执行完整的分析流程"""
         # 1. 确定功率列名
         power_col = None
-        
-        # 打印所有列名用于调试
+
         print(f"\n🔍 数据列名检测:")
         print(f"   场景: {self.current_scene}")
         print(f"   所有列: {list(df.columns)}")
-        
+
         if "光伏" in self.current_scene:
-            # 光伏功率列名（注意空格）
             possible_cols = ['Power (MW)', 'Power(MW)', '实际发电功率（mw）', '功率(MW)', 'power']
         else:
-            # 风电功率列名
             possible_cols = ['实际发电功率（mw）', '功率(MW)', 'Power (MW)', 'Power(MW)', 'power']
-        
+
         for col in possible_cols:
             if col in df.columns:
                 power_col = col
                 print(f"   ✅ 找到功率列: '{col}'")
                 break
-        
+
         if not power_col:
             print(f"   ❌ 未找到功率列！可用列: {list(df.columns)}")
             error_msg = f"❌ 未找到功率列\n\n可用列:\n" + "\n".join([f"  • {col}" for col in df.columns[:10]])
             if len(df.columns) > 10:
                 error_msg += f"\n  ... 等{len(df.columns)}列"
-            
-            quality_content = self.quality_card.findChild(QLabel, '', Qt.FindChildrenRecursively)
-            if quality_content:
-                quality_content.setText(error_msg)
+
+            self.quality_content_label.setText(error_msg)
             return
-        
-        # 2. 数据清洗
-        df_clean = df.dropna(subset=[power_col]).copy()
-        missing_count = len(df) - len(df_clean)
-        
-        print(f"   📊 数据总量: {len(df)}, 有效数据: {len(df_clean)}, 缺失: {missing_count}")
-        
-        # 3. 绘制时序曲线
-        self.plot_time_series(df_clean, power_col)
-        
-        # 4. 峰值分析
-        self.analyze_peak(df_clean, power_col)
-        
-        # 5. 数据质量诊断
-        self.diagnose_quality(df, df_clean, power_col, missing_count)
-    
-    def plot_time_series(self, df, power_col):
-        """绘制时序曲线"""
-        # 🚀 延迟加载 Matplotlib
-        if self.figure is None:
-            from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-            from matplotlib.figure import Figure
-            from matplotlib import rcParams
-            
-            # 配置中文字体
-            rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei']
-            rcParams['axes.unicode_minus'] = False
-            
-            self.figure = Figure(figsize=(8, 5), dpi=100, facecolor='#ffffff')
-            self.canvas = FigureCanvas(self.figure)
-            self.canvas.setStyleSheet("""
-                background-color: rgba(255, 255, 255, 0.95); 
-                border: 2px solid #b2dfdb; 
-                border-radius: 12px;
-            """)
-            
-            # 清除旧内容并添加画布
-            old_layout = self.left_panel.layout()
-            if old_layout:
-                # 清空旧布局中的所有widget
-                while old_layout.count():
-                    item = old_layout.takeAt(0)
-                    if item.widget():
-                        item.widget().deleteLater()
-                # 不删除旧布局，直接复用
-            else:
-                # 如果没有布局，创建新布局
-                old_layout = QVBoxLayout(self.left_panel)
-            
-            old_layout.addWidget(self.canvas)
-        
-        # 绘制图表
-        self.figure.clear()
-        ax = self.figure.add_subplot(111)
-        
-        # 取最近1000个点以避免过于密集
-        sample_size = min(1000, len(df))
-        df_plot = df.tail(sample_size)
-        
-        x = range(len(df_plot))
-        y = df_plot[power_col].values
-        
-        ax.plot(x, y, color='#00897b', linewidth=1.5, alpha=0.8)
-        ax.fill_between(x, y, alpha=0.3, color='#00897b')
-        
-        ax.set_title(f'最近{sample_size}个时间点功率变化趋势', fontsize=12, fontweight='bold', color='#2c3e50', pad=10)
-        ax.set_xlabel('时间点', fontsize=10, color='#546e7a', labelpad=8)
-        ax.set_ylabel('功率 (MW)', fontsize=10, color='#546e7a', labelpad=8)
-        ax.grid(True, linestyle='--', alpha=0.5, color='#b0bec5')
-        ax.set_facecolor('#f5f5f5')
-        
-        # 调整布局（增加边距确保标签完整显示）
-        self.figure.tight_layout(pad=1.5, rect=[0, 0.03, 1, 0.97])
-        self.canvas.draw()
-    
-    def analyze_peak(self, df, power_col):
-        """分析月度峰值"""
-        # 扩展时间列名检测（支持更多常见格式）
+
+        # 2. 查找时间列
         time_col = None
         possible_time_cols = [
-            '时间', 'Time', 'datetime', 'date', 'DateTime', 
-            '日期', 'Date', 'Timestamp', 'timestamp', '采样时间', 
+            '时间', 'Time', 'datetime', 'date', 'DateTime',
+            '日期', 'Date', 'Timestamp', 'timestamp', '采样时间',
             '数据时间', '记录时间', 'TIME', 'DATE'
         ]
-        
+
         for col in possible_time_cols:
             if col in df.columns:
                 time_col = col
                 break
-        
-        # 如果没找到，尝试模糊匹配包含"时间"或"time"的列
+
         if not time_col:
             for col in df.columns:
                 if '时间' in col or 'time' in col.lower() or 'date' in col.lower():
                     time_col = col
                     break
-        
-        if time_col:
-            try:
-                df_copy = df.copy()
-                df_copy[time_col] = pd.to_datetime(df_copy[time_col])
-                df_copy['month'] = df_copy[time_col].dt.month
+
+        if not time_col:
+            print("⚠️ 未找到时间列，无法进行时间分析")
+            self.chart_placeholder.setText("⚠️ 未找到时间列，无法进行分析")
+            return
+
+        # 3. 数据清洗
+        df_clean = df.dropna(subset=[power_col]).copy()
+        df_clean[time_col] = pd.to_datetime(df_clean[time_col], errors='coerce')
+        df_clean = df_clean.dropna(subset=[time_col])
+        missing_count = len(df) - len(df_clean)
+
+        print(f"   📊 数据总量: {len(df)}, 有效数据: {len(df_clean)}, 缺失: {missing_count}")
+
+        # 4. 绘制功率曲线（新逻辑）
+        self.plot_power_curve(df_clean, power_col, time_col)
+
+        # 5. 分析日发电峰值
+        self.analyze_daily_peak(df_clean, power_col, time_col)
+
+        # 6. 数据质量诊断（简化版）
+        self.diagnose_quality_simple(df, df_clean, power_col, missing_count)
+
+    def plot_power_curve(self, df, power_col, time_col):
+        """绘制两张功率曲线图：近30天日曲线 + 近24小时小时曲线"""
+        try:
+            # 🔧 根据粒度获取重采样频率
+            granularity_text = self.granularity_combo.currentText()
+            granularity_map = {
+                "5分钟": "5min",
+                "15分钟": "15min",
+                "30分钟": "30min",
+                "1小时": "1h"
+            }
+            freq = granularity_map.get(granularity_text, "15min")
                 
-                # 按月统计最大功率
-                monthly_max = df_copy.groupby('month')[power_col].max()
-                peak_month = monthly_max.idxmax()
-                peak_value = monthly_max.max()
+            # 设置时间列为索引
+            df_indexed = df.set_index(time_col)
+            
+            print(f"🔍 数据时间范围: {df_indexed.index.min()} ~ {df_indexed.index.max()}")
+            print(f" 数据总量: {len(df_indexed)} 条")
+            
+            # 🔧 初始化图表渲染器并清除（只清除一次）
+            self.chart_renderer._ensure_matplotlib()
+            self.chart_renderer.figure.clear()
                 
-                # 找出峰值日期
-                peak_data = df_copy[df_copy['month'] == peak_month]
-                peak_day_idx = peak_data[power_col].idxmax()
-                peak_date = df_copy.loc[peak_day_idx, time_col].strftime('%Y-%m-%d')
+            # 📊 图1：近30天的日功率曲线
+            max_time = df_indexed.index.max()
+            min_time_30d = max_time - pd.Timedelta(days=30)
+            df_last_30_days = df_indexed[df_indexed.index >= min_time_30d]
+            
+            print(f" 近30天数据量: {len(df_last_30_days)} 条")
+            
+            has_daily = False
+            has_hourly = False
+            
+            if len(df_last_30_days) > 0:
+                df_daily = df_last_30_days[[power_col]].resample('1D').sum()
+                # 移除空值
+                df_daily = df_daily.dropna()
+                # 取最近30天
+                df_daily_30 = df_daily.tail(30)
                 
-                result_text = (
-                    f"🏆 最高发电月份: {peak_month}月\n"
-                    f"⚡ 峰值功率: {peak_value:.2f} MW\n"
-                    f"📅 峰值日期: {peak_date}\n"
-                    f"📊 月平均功率: {df_copy.groupby('month')[power_col].mean()[peak_month]:.2f} MW"
+                print(f"🔍 日聚合后数据量: {len(df_daily_30)} 天")
+                    
+                dates = df_daily_30.index.strftime('%m-%d').tolist()
+                x_ticks_daily = list(range(len(dates)))
+                x_labels_daily = dates
+                    
+                self._render_power_chart_subplot(
+                    df_daily_30, power_col, 
+                    "近30天日功率曲线", 
+                    "日期", 
+                    x_ticks_daily, x_labels_daily,
+                    chart_index=0  # 第一个图表
                 )
-            except Exception as e:
-                print(f"⚠️ 时间列解析失败: {e}")
-                # 失败时降级到整体统计
-                max_power = df[power_col].max()
-                mean_power = df[power_col].mean()
-                result_text = (
-                    f" 历史峰值功率: {max_power:.2f} MW\n"
-                    f" 平均功率: {mean_power:.2f} MW\n"
-                    f"⚠️ 时间列解析失败，无法进行月度分析"
-                )
+                has_daily = True
+                print(f"✅ 日曲线绘制完成: {len(df_daily_30)}个点")
+            else:
+                print("⚠️ 近30天无数据，跳过日曲线绘制")
+                
+            #  图2：近24小时的小时功率曲线
+            min_time_24h = max_time - pd.Timedelta(hours=24)
+            df_last_24h = df_indexed[df_indexed.index >= min_time_24h]
+            
+            print(f"🔍 近24小时数据量: {len(df_last_24h)} 条")
+            
+            if len(df_last_24h) > 0:
+                df_hourly = df_last_24h[[power_col]].resample('1h').sum()
+                # 移除空值
+                df_hourly = df_hourly.dropna()
+                
+                print(f"🔍 小时聚合后数据量: {len(df_hourly)} 小时")
+                
+                # 🔧 根据实际数据生成X轴标签（不固定为0-23点）
+                if len(df_hourly) > 0:
+                    actual_times = df_hourly.index.strftime('%H:%M').tolist()
+                    
+                    x_ticks_hourly = list(range(len(actual_times)))
+                    x_labels_hourly = actual_times
+                    
+                    # 如果数据点较多，每隔几个显示一个标签
+                    if len(x_labels_hourly) > 12:
+                        step = len(x_labels_hourly) // 12
+                        display_labels = ['' if i % step != 0 else label for i, label in enumerate(x_labels_hourly)]
+                        x_labels_hourly = display_labels
+                    
+                    self._render_power_chart_subplot(
+                        df_hourly, power_col,
+                        "近24小时功率曲线",
+                        "时间",
+                        x_ticks_hourly, x_labels_hourly,
+                        chart_index=1  # 第二个图表
+                    )
+                    has_hourly = True
+                    print(f"✅ 小时曲线绘制完成: {len(df_hourly)}个点")
+                else:
+                    print("️ 小时聚合后无数据")
+            else:
+                print("⚠️ 近24小时无数据，跳过小时曲线绘制")
+            
+            # 🔧 调整布局并嵌入界面（只在有图表时执行）
+            if has_daily or has_hourly:
+                self.chart_renderer.figure.tight_layout(pad=2.0, rect=[0, 0.03, 1, 0.97])
+                self.chart_renderer.canvas.draw()
+                
+                # 嵌入到界面
+                old_layout = self.chart_card.layout()
+                if old_layout:
+                    while old_layout.count():
+                        item = old_layout.takeAt(0)
+                        if item.widget():
+                            item.widget().deleteLater()
+                else:
+                    old_layout = QVBoxLayout(self.chart_card)
+                
+                old_layout.addWidget(self.chart_title_label)
+                old_layout.addWidget(self.chart_renderer.canvas)
+                print("✅ 图表已嵌入界面")
+                
+        except Exception as e:
+            print(f"⚠️ 功率曲线绘制失败: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _render_power_chart_subplot(self, df, power_col, title, x_label, x_ticks, x_labels, chart_index=0):
+        """渲染单个功率柱状图子图（不执行clear和布局调整）"""
+        # 创建子图布局：如果是第一个图表，显示在上方；第二个图表显示在下方
+        if chart_index == 0:
+            ax = self.chart_renderer.figure.add_subplot(211)  # 2行1列，第1个
         else:
-            # 没有时间列，仅显示整体统计
-            max_power = df[power_col].max()
-            mean_power = df[power_col].mean()
+            ax = self.chart_renderer.figure.add_subplot(212)  # 2行1列，第2个
+            
+        x = range(len(df))
+        y = df[power_col].values
+            
+        # 绘制柱状图
+        from gui_config import CHART_COLOR_BAR
+        ax.bar(x, y, color=CHART_COLOR_BAR, alpha=0.7, edgecolor='#2e7d32', linewidth=2)
+            
+        # 设置x轴刻度
+        if len(x_ticks) <= 31:  # 如果点数不多，显示所有标签
+            ax.set_xticks(x_ticks)
+            ax.set_xticklabels(x_labels, rotation=45, ha='right')
+            
+        # 使用纯文本标题
+        ax.set_title(title, fontsize=12, fontweight='bold', color='#2c3e50', pad=10)
+        ax.set_xlabel(x_label, fontsize=10, color='#546e7a', labelpad=8)
+        ax.set_ylabel('功率 (MW)', fontsize=10, color='#546e7a', labelpad=8)
+        ax.grid(True, linestyle='--', alpha=0.6, color='#e0e0e0')
+        ax.set_facecolor('#f5f5f5')
+
+    def analyze_daily_peak(self, df, power_col, time_col):
+        """分析月度日发电峰值"""
+        try:
+            # 按日汇总发电量
+            df_copy = df.copy()
+            df_copy['date'] = df_copy[time_col].dt.date
+            daily_generation = df_copy.groupby('date')[power_col].sum()
+
+            if len(daily_generation) == 0:
+                self.peak_content_label.setText("⚠️ 无有效数据")
+                return
+
+            # 找出最高日
+            peak_date = daily_generation.idxmax()
+            peak_value = daily_generation.max()
+
+            # 计算日均
+            avg_daily = daily_generation.mean()
+
+            # 找出峰值功率时刻
+            peak_day_data = df_copy[df_copy[time_col].dt.date == peak_date]
+            if len(peak_day_data) > 0:
+                peak_power_idx = peak_day_data[power_col].idxmax()
+                peak_power_time = peak_day_data.loc[peak_power_idx, time_col].strftime('%H:%M')
+                peak_power_value = peak_day_data.loc[peak_power_idx, power_col]
+            else:
+                peak_power_time = "N/A"
+                peak_power_value = 0
+
             result_text = (
-                f"⚡ 历史峰值功率: {max_power:.2f} MW\n"
-                f"📊 平均功率: {mean_power:.2f} MW\n"
-                f"ℹ️ 未检测到时间列，无法进行月度分析"
+                f"📅 最高发电日: {peak_date}\n"
+                f"⚡ 当日发电量: {peak_value:.2f} MW\n"
+                f"📊 日均发电量: {avg_daily:.2f} MW\n"
+                f"🔝 峰值功率: {peak_power_value:.2f} MW ({peak_power_time})"
             )
-        
-        # 更新卡片内容
-        content_label = self.peak_analysis_card.findChild(QLabel, '', Qt.FindChildrenRecursively)
-        if content_label:
-            content_label.setText(result_text)
-            content_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            content_label.setStyleSheet("color: #37474f; font-size: 12px; line-height: 1.6;")
-    
-    def diagnose_quality(self, df_original, df_clean, power_col, missing_count):
-        """数据质量诊断"""
+
+            self.peak_content_label.setText(result_text)
+
+        except Exception as e:
+            print(f"⚠️ 日峰值分析失败: {e}")
+            self.peak_content_label.setText(f"⚠️ 分析失败: {str(e)}")
+
+    def diagnose_quality_simple(self, df_original, df_clean, power_col, missing_count):
+        """简化版数据质量诊断"""
         total_rows = len(df_original)
         valid_rows = len(df_clean)
         missing_pct = (missing_count / total_rows * 100) if total_rows > 0 else 0
-            
+
         # 检测异常值（超过3倍标准差）
         mean_val = df_clean[power_col].mean()
         std_val = df_clean[power_col].std()
-        outlier_mask = (df_clean[power_col] < mean_val - 3*std_val) | (df_clean[power_col] > mean_val + 3*std_val)
+        outlier_mask = (df_clean[power_col] < mean_val - 3 * std_val) | (df_clean[power_col] > mean_val + 3 * std_val)
         outlier_count = outlier_mask.sum()
         outlier_pct = (outlier_count / valid_rows * 100) if valid_rows > 0 else 0
-            
+
         # 评估数据质量等级
         if missing_pct < 1 and outlier_pct < 1:
             quality_level = "✅ 优秀"
             quality_color = "#2e7d32"
         elif missing_pct < 5 and outlier_pct < 5:
-            quality_level = "️ 良好"
+            quality_level = "⚠️ 良好"
             quality_color = "#f57c00"
         else:
             quality_level = "❌ 需改进"
             quality_color = "#d32f2f"
-            
-        # 🔧 修复：QLabel不支持HTML的span标签，使用富文本格式
+
         result_text = (
-            f"📋 数据总量: {total_rows} 条\n"
-            f"✅ 有效数据: {valid_rows} 条 ({100-missing_pct:.1f}%)\n"
-            f"❌ 缺失数据: {missing_count} 条 ({missing_pct:.1f}%)\n"
-            f"⚠️ 异常值: {outlier_count} 条 ({outlier_pct:.1f}%)\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🎯 质量评级: "
+            f"<p style='margin: 16px 0;'>📋 数据总量: {total_rows} 条</p>"
+            f"<p style='margin: 16px 0;'>✅ 有效数据: {valid_rows} 条 ({100 - missing_pct:.1f}%)</p>"
+            f"<p style='margin: 16px 0;'>❌ 缺失数据: {missing_count} 条 ({missing_pct:.1f}%)</p>"
+            f"<p style='margin: 16px 0;'>⚠️ 异常值: {outlier_count} 条 ({outlier_pct:.1f}%)</p>"
+            f"<hr style='margin: 10px 0; border: 1px solid #e0e0e0;'>"
+            f"<p style='margin: 16px 0; font-weight: bold;'>🎯 质量评级: {quality_level}</p>"
         )
-            
-        # 更新卡片内容
-        content_label = self.quality_card.findChild(QLabel, '', Qt.FindChildrenRecursively)
-        if content_label:
-            # 使用HTML富文本渲染彩色评级
-            html_text = result_text + f'<span style="color:{quality_color}; font-weight:bold;">{quality_level}</span>'
-            content_label.setText(html_text)
-            content_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            content_label.setStyleSheet("color: #37474f; font-size: 12px; line-height: 1.6;")
+                
+        self.quality_content_label.setText(result_text)
     
     def reset_analysis(self):
         """重置分析视图"""
@@ -1594,14 +1598,14 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
 
     # 设置应用图标（使用资源路径工具）
-    icon_path = resource_path('./res/icon.png')
+    icon_path = resource_path(ICON_PATH)
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
 
     window = EnergyForecastApp()
 
     # 使用背景图片（使用资源路径工具）
-    bg_path = resource_path('./res/background.png')
+    bg_path = resource_path(BACKGROUND_PATH)
     if os.path.exists(bg_path):
         # 🔧 关键修复：使用 border-image 代替 background-image，它能更好地处理拉伸和路径
         window.setStyleSheet(f"""
