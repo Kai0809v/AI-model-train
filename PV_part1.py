@@ -139,7 +139,7 @@ def run_feature_optimization_pipeline(input_path, output_dir="processed_data"):
     print(f"   -> 验证集: {len(df_val)} 样本")
     print(f"   -> 测试集: {len(df_test)} 样本")
     
-    print("3.5. 🆕 在各个集合上独立计算滞后和滚动特征（避免数据泄露）...")
+    print("3.5.  在各个集合上独立计算滞后和滚动特征（避免数据泄露）...")
     # 为每个集合独立添加滞后和滚动特征
     df_train = add_lag_and_rolling_features(
         df_train, 
@@ -252,7 +252,7 @@ def run_feature_optimization_pipeline(input_path, output_dir="processed_data"):
         'scaler_y': scaler_y,
         'pca': pca,
         'selected_features': selected_features,
-        # 新增：时间特征 (Month, Day, Weekday, Hour, Minute) 用于 Informer 时间编码
+        # 时间特征 (Month, Day, Weekday, Hour, Minute) 用于 Informer 时间编码
         'time_features': (df_train[['Month', 'Day', 'DayOfWeek', 'Hour', 'Minute']].values,
                           df_val[['Month', 'Day', 'DayOfWeek', 'Hour', 'Minute']].values,
                           df_test[['Month', 'Day', 'DayOfWeek', 'Hour', 'Minute']].values)

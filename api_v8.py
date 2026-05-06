@@ -3,14 +3,13 @@
 # TODO：在GUI选择有缺失的数据预测时会有报错
 # ============================================
 
+import math
 import os
 import sys
+
+import pandas as pd
 import torch
 import torch.nn as nn
-import numpy as np
-import pandas as pd
-import math
-from joblib import load, dump
 
 # 修复Informer2020的导入路径问题
 # 将Informer2020目录添加到Python路径中
@@ -19,7 +18,6 @@ if informer_path not in sys.path:
     sys.path.insert(0, informer_path)
 
 # 导入光伏预测相关模块
-from model_architecture import True_TCN_Informer
 
 # ============================================
 # 资源路径处理工具（解决打包后路径失效问题）
