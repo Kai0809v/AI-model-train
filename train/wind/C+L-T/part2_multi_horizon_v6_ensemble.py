@@ -1,6 +1,7 @@
 # ============================================
-# 多步长预测模型 V4 - 混合策略优化版
-# 核心思路：短期用简单模型，长期用强化正则化
+# 多步长预测模型 V6 - 集成学习版
+# 核心策略：训练5个不同随机种子的V4模型，预测时取平均
+# 预期收益：R²提升1-2%，稳定性显著提升
 # ============================================
 
 import torch
@@ -20,10 +21,10 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 # ============================================
 
 print("正在加载多步数据集...")
-multi_step_datasets = load("multi_step_datasets.pkl")
-scaler_y = load("scaler_y")
+multi_step_datasets = load("../../../multi_step_datasets.pkl")
+scaler_y = load("../../../scaler_y")
 
-for h in [1, 4, 8, 16]:
+for h in [1, 4, 8]:  # 🔧 移除16步
     data = multi_step_datasets[h]
     print(f"\n{h}步预测数据:")
     print(f"  训练集: {data['train_x'].shape}, 标签: {data['train_y'].shape}")
@@ -75,12 +76,12 @@ if len(selected_features) < int(feature_dim * 0.9):
 
 print(f"原始特征维度：{feature_dim} -> 筛选后维度：{len(selected_features)}")
 
-for h in [1, 4, 8, 16]:
+for h in [1, 4, 8]:
     multi_step_datasets[h]['train_x'] = multi_step_datasets[h]['train_x'][:, :, selected_features]
     multi_step_datasets[h]['test_x'] = multi_step_datasets[h]['test_x'][:, :, selected_features]
 
 # ============================================
-# 3 简化的Transformer模型（回退到V2稳定架构）
+# 3 Transformer模型（V4稳定架构）
 # ============================================
 
 class PositionalEncoding(nn.Module):
@@ -100,14 +101,7 @@ class PositionalEncoding(nn.Module):
 
 
 class SimpleMultiStepTransformer(nn.Module):
-    """
-    V4简化版：回退到V2的稳定架构
-    
-    🔧 关键决策：
-    1. 使用浅层注意力池化（避免过拟合）
-    2. 移除BatchNorm（小batch不稳定）
-    3. 保持4层Transformer
-    """
+    """V4稳定架构"""
     def __init__(self, input_dim, horizon=1):
         super().__init__()
         
@@ -120,14 +114,12 @@ class SimpleMultiStepTransformer(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=4)
         
-        # 🔧 回退：使用V2的浅层注意力池化
         self.attention_pooling = nn.Sequential(
             nn.Linear(256, 128),
             nn.Tanh(),
             nn.Linear(128, 1)
         )
         
-        # 简化预测头
         self.fc = nn.Sequential(
             nn.Linear(256, 128),
             nn.ReLU(),
@@ -154,148 +146,170 @@ class SimpleMultiStepTransformer(nn.Module):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ============================================
-# 4 混合训练策略：短期简单，长期强化
+# 4 集成学习：训练多个模型
 # ============================================
 
-print(f"\n开始在 {device} 上训练多步长模型（V4混合策略）...")
+print(f"\n开始在 {device} 上训练集成模型（V6）...")
 
-models = {}
-results = {}
+# 🔧 定义5个随机种子
+seeds = [42, 123, 456, 789, 1024]
+ensemble_models = {h: [] for h in [1, 4, 8]}
 
-for h in [1, 4, 8, 16]:
+for h in [1, 4, 8]:
     print(f"\n{'='*60}")
-    print(f"训练 {h}步预测模型")
+    print(f"训练 {h}步预测的集成模型（5个种子）")
     print(f"{'='*60}")
     
-    # 设置随机种子
-    torch.manual_seed(42 + h)
-    np.random.seed(42 + h)
-    random.seed(42 + h)
-    
-    # 创建模型
-    model = SimpleMultiStepTransformer(
-        input_dim=len(selected_features),
-        horizon=h
-    ).to(device)
-    
-    # 数据加载器
-    batch_size = 64
-    train_dataset = TensorDataset(
-        multi_step_datasets[h]['train_x'],
-        multi_step_datasets[h]['train_y']
-    )
-    test_dataset = TensorDataset(
-        multi_step_datasets[h]['test_x'],
-        multi_step_datasets[h]['test_y_raw']
-    )
-    
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-    
-    # 🔧 V4混合策略：根据步长选择不同的训练配置
-    if h == 1:
-        # 1步：使用简单高效的配置（回退到V2）
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.0005, weight_decay=1e-5)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5
+    for seed_idx, seed in enumerate(seeds):
+        print(f"\n--- 种子 {seed_idx+1}/5: seed={seed} ---")
+        
+        # 设置随机种子
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+        
+        # 创建模型
+        model = SimpleMultiStepTransformer(
+            input_dim=len(selected_features),
+            horizon=h
+        ).to(device)
+        
+        # 数据加载器
+        batch_size = 64
+        train_dataset = TensorDataset(
+            multi_step_datasets[h]['train_x'],
+            multi_step_datasets[h]['train_y']
         )
-        epochs = 50
-        print(f"  [Strategy] Short-term: Adam + ReduceLROnPlateau (Simple)")
-        
-    elif h >= 8:
-        # 8步和16步：使用强正则化配置
-        optimizer = torch.optim.AdamW(model.parameters(), lr=0.0003, weight_decay=5e-4)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=8
+        test_dataset = TensorDataset(
+            multi_step_datasets[h]['test_x'],
+            multi_step_datasets[h]['test_y_raw']
         )
-        epochs = 60  # 更多epochs让强正则化模型充分收敛
-        print(f"  [Strategy] Long-term: AdamW + Strong Regularization")
         
-    else:
-        # 4步：中等配置
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.0004, weight_decay=2e-5)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=6
-        )
-        epochs = 55
-        print(f"  [Strategy] Mid-term: Adam + Moderate Regularization")
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+        
+        # V4混合策略配置
+        if h == 1:
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.0005, weight_decay=1e-5)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.5, patience=5
+            )
+            epochs = 50
+            
+        elif h == 4:
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.0004, weight_decay=2e-5)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.5, patience=6
+            )
+            epochs = 55
+            
+        else:  # h == 8
+            optimizer = torch.optim.AdamW(model.parameters(), lr=0.0003, weight_decay=5e-4)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.5, patience=8
+            )
+            epochs = 60
+        
+        # 训练循环
+        best_val_loss = float('inf')
+        patience_counter = 0
+        early_stop_patience = 15
+        
+        for epoch in range(epochs):
+            model.train()
+            epoch_loss = 0
+            
+            for x, y in train_loader:
+                x, y = x.to(device), y.to(device)
+                
+                pred = model(x)
+                loss = nn.MSELoss()(pred, y)
+                
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                
+                epoch_loss += loss.item()
+            
+            epoch_loss /= len(train_loader)
+            
+            # 验证
+            model.eval()
+            val_loss = 0
+            with torch.no_grad():
+                for x, y in test_loader:
+                    x = x.to(device)
+                    pred = model(x)
+                    val_loss += nn.MSELoss()(pred, y.to(device)).item()
+            
+            val_loss /= len(test_loader)
+            scheduler.step(val_loss)
+            
+            if (epoch + 1) % 10 == 0 or epoch == 0:
+                print(f"    Epoch [{epoch + 1}/{epochs}] - Train Loss: {epoch_loss:.6f} - Val Loss: {val_loss:.6f}")
+            
+            # 早停
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+                torch.save(model.state_dict(), f"transformer_h{h}_seed{seed}_v6_best.pth")
+            else:
+                patience_counter += 1
+                if patience_counter >= early_stop_patience:
+                    print(f"    早停触发于 Epoch {epoch + 1}")
+                    break
+        
+        # 加载最佳模型
+        model.load_state_dict(torch.load(f"transformer_h{h}_seed{seed}_v6_best.pth"))
+        ensemble_models[h].append(model)
+        
+        print(f"  ✓ 种子{seed}训练完成")
+
+# ============================================
+# 5 集成预测与评估
+# ============================================
+
+print("\n=== 集成预测评估 ===")
+
+results = {}
+
+for h in [1, 4, 8]:
+    print(f"\n--- {h}步预测（5模型集成）---")
     
-    # 训练循环
-    best_val_loss = float('inf')
-    patience_counter = 0
-    early_stop_patience = 15
+    all_preds = []
     
-    for epoch in range(epochs):
-        model.train()
-        epoch_loss = 0
-        
-        for x, y in train_loader:
-            x, y = x.to(device), y.to(device)
-            
-            pred = model(x)
-            loss = nn.MSELoss()(pred, y)
-            
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            
-            epoch_loss += loss.item()
-        
-        epoch_loss /= len(train_loader)
-        
-        # 验证
+    # 对每个模型进行预测
+    for seed_idx, model in enumerate(ensemble_models[h]):
         model.eval()
-        val_loss = 0
+        pred_list = []
+        
         with torch.no_grad():
-            for x, y in test_loader:
+            for x, _ in DataLoader(
+                TensorDataset(multi_step_datasets[h]['test_x'], 
+                             multi_step_datasets[h]['test_y_raw']),
+                batch_size=64, shuffle=False
+            ):
                 x = x.to(device)
                 pred = model(x)
-                val_loss += nn.MSELoss()(pred, y.to(device)).item()
+                pred_list.append(pred.cpu().numpy())
         
-        val_loss /= len(test_loader)
-        scheduler.step(val_loss)
-        
-        if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"  Epoch [{epoch + 1}/{epochs}] - Train Loss: {epoch_loss:.6f} - Val Loss: {val_loss:.6f}")
-        
-        # 早停
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_counter = 0
-            torch.save(model.state_dict(), f"transformer_h{h}_v4_best.pth")
-        else:
-            patience_counter += 1
-            if patience_counter >= early_stop_patience:
-                print(f"  早停触发于 Epoch {epoch + 1}")
-                break
+        pred_scaled = np.vstack(pred_list)
+        all_preds.append(pred_scaled)
+        print(f"  种子{seeds[seed_idx]}预测完成")
     
-    # 加载最佳模型
-    model.load_state_dict(torch.load(f"transformer_h{h}_v4_best.pth"))
-    models[h] = model
+    # 🔧 集成：取5个模型的平均值
+    pred_scaled_ensemble = np.mean(all_preds, axis=0)
     
-    # 评估
-    print(f"\n  评估 {h}步模型...")
-    model.eval()
-    pred_list = []
-    true_list = []
-    
-    with torch.no_grad():
-        for x, y in test_loader:
-            x = x.to(device)
-            pred = model(x)
-            pred_list.append(pred.cpu().numpy())
-            true_list.append(y.numpy())
-    
-    pred_scaled = np.vstack(pred_list)
-    true_scaled = np.vstack(true_list)
+    # 获取真实值
+    true_scaled = multi_step_datasets[h]['test_y_raw'].numpy()
     
     # 反归一化
-    pred_real = np.zeros_like(pred_scaled)
+    pred_real = np.zeros_like(pred_scaled_ensemble)
     true_real = np.zeros_like(true_scaled)
     
     for col in range(h):
-        pred_real[:, col] = scaler_y.inverse_transform(pred_scaled[:, col:col+1]).flatten()
+        pred_real[:, col] = scaler_y.inverse_transform(pred_scaled_ensemble[:, col:col+1]).flatten()
         true_real[:, col] = scaler_y.inverse_transform(true_scaled[:, col:col+1]).flatten()
     
     # 计算指标
@@ -316,13 +330,13 @@ for h in [1, 4, 8, 16]:
     }
 
 # ============================================
-# 5 可视化
+# 6 可视化
 # ============================================
 
-plt.figure(figsize=(20, 12))
+plt.figure(figsize=(18, 6))
 
-for idx, h in enumerate([1, 4, 8, 16], 1):
-    plt.subplot(2, 2, idx)
+for idx, h in enumerate([1, 4, 8], 1):
+    plt.subplot(1, 3, idx)
     
     n_samples = min(100, len(results[h]['pred_real']))
     pred_mean = results[h]['pred_real'][:n_samples].mean(axis=0)
@@ -330,22 +344,22 @@ for idx, h in enumerate([1, 4, 8, 16], 1):
     
     timesteps = np.arange(h)
     plt.plot(timesteps, true_mean, label="True Power", color='green', linewidth=2, marker='o')
-    plt.plot(timesteps, pred_mean, label="Predicted Power", color='red', linewidth=2, marker='s')
+    plt.plot(timesteps, pred_mean, label="Ensemble Prediction", color='red', linewidth=2, marker='s')
     
-    plt.title(f"{h}-Step Forecast (V4)\nRMSE: {results[h]['rmse']:.2f} MW, R²: {results[h]['r2']:.3f}")
+    plt.title(f"{h}-Step Ensemble Forecast\nRMSE: {results[h]['rmse']:.2f} MW, R²: {results[h]['r2']:.3f}")
     plt.xlabel("Forecast Horizon (15min steps)")
     plt.ylabel("Power (MW)")
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.6)
 
 plt.tight_layout()
-plt.savefig("multi_horizon_v4_results.png", dpi=150, bbox_inches='tight')
+plt.savefig("multi_horizon_v6_ensemble_results.png", dpi=150, bbox_inches='tight')
 plt.show()
 
 # 性能对比图
 plt.figure(figsize=(10, 6))
 
-horizons = [1, 4, 8, 16]
+horizons = [1, 4, 8]
 rmses = [results[h]['rmse'] for h in horizons]
 r2s = [results[h]['r2'] for h in horizons]
 
@@ -357,34 +371,53 @@ plt.bar(x_pos + width/2, r2s, width, label='R²', color='coral')
 
 plt.xlabel('Forecast Horizon (steps)')
 plt.ylabel('Metric Value')
-plt.title('Multi-Horizon Prediction Performance (V4 - Hybrid Strategy)')
+plt.title('Multi-Horizon Ensemble Prediction Performance (V6 - 5 Models)')
 plt.xticks(x_pos, horizons)
 plt.legend()
 plt.grid(True, linestyle='--', alpha=0.6, axis='y')
 
 plt.tight_layout()
-plt.savefig("multi_horizon_v4_comparison.png", dpi=150, bbox_inches='tight')
+plt.savefig("multi_horizon_v6_comparison.png", dpi=150, bbox_inches='tight')
 plt.show()
 
 # ============================================
-# 6 保存模型
+# 7 保存模型（打包集成）
 # ============================================
 
 print("\n开始保存模型资产...")
 
-dump(lgb_model, "lgb_feature_selector.joblib")
+# 保存LightGBM特征选择器
+dump(lgb_model, "../../../lgb_feature_selector.joblib")
 print("[+] 已保存: lgb_feature_selector.joblib")
 
-np.save("selected_features_indices.npy", selected_features)
+# 保存特征索引
+np.save("../../../selected_features_indices.npy", selected_features)
 print("[+] 已保存: selected_features_indices.npy")
 
-print("\n🎉 多步长模型V4训练完成！")
+# 🔧 打包保存集成模型：每个步长保存为一个文件
+for h in [1, 4, 8]:
+    ensemble_package = {
+        'horizon': h,
+        'num_models': len(ensemble_models[h]),
+        'seeds': seeds,
+        'model_state_dicts': [model.state_dict() for model in ensemble_models[h]],
+        'feature_dim': len(selected_features),
+        'performance': {
+            'rmse': results[h]['rmse'],
+            'mae': results[h]['mae'],
+            'r2': results[h]['r2']
+        }
+    }
+    
+    torch.save(ensemble_package, f"ensemble_models_h{h}_v6.pth")
+    print(f"[+] 已保存: ensemble_models_h{h}_v6.pth (包含{len(ensemble_models[h])}个模型)")
+
+print("\n🎉 集成模型V6训练完成！")
 print("\n=== 最终性能汇总 ===")
-for h in [1, 4, 8, 16]:
+for h in [1, 4, 8]:
     print(f"{h}步: RMSE={results[h]['rmse']:.4f} MW, MAE={results[h]['mae']:.4f} MW, R²={results[h]['r2']:.4f}")
 """
-1步: RMSE=10.5930 MW, MAE=7.1908 MW, R²=0.9694 
-4步: RMSE=19.9456 MW, MAE=11.8586 MW, R²=0.8915 
-8步: RMSE=27.2854 MW, MAE=17.5396 MW, R²=0.7965 
-16步: RMSE=38.3381 MW, MAE=27.6826 MW, R²=0.5956
+1步: RMSE=9.7282 MW, MAE=6.0694 MW, R²=0.9742
+4步: RMSE=19.6523 MW, MAE=12.3841 MW, R²=0.8946
+8步: RMSE=27.3576 MW, MAE=17.9583 MW, R²=0.7954
 """

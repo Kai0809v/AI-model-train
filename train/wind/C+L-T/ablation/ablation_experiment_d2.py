@@ -42,7 +42,7 @@ test_label = load("full_test_label")
 train_set_noceem = load("noceem_train_set")
 test_set_noceem = load("noceem_test_set")
 
-scaler_y = load("scaler_y")
+scaler_y = load("../../../../scaler_y")
 
 
 # ============================================

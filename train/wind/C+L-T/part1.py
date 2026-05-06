@@ -273,8 +273,8 @@ def normalize_data(X_train, X_test, y_train, y_test, y_test_raw):
 
     y_test_raw_scaled = scaler_y.transform(y_test_raw)
 
-    dump(scaler_x, "scaler_x")
-    dump(scaler_y, "scaler_y")
+    dump(scaler_x, "../../../scaler_x")
+    dump(scaler_y, "../../../scaler_y")
 
     return X_train_scaled, X_test_scaled, y_train_scaled, y_test_scaled, y_test_raw_scaled
 
@@ -370,7 +370,7 @@ def build_windows(X_all, y_clean_all, y_raw_test, window_size, split_index):
 # ============================================
 
 if __name__ == "__main__":
-    DATA_PATH = "wind_data.csv" # 每 15 分钟一个数据点
+    DATA_PATH = "../../../wind_data.csv"  # 每 15 分钟一个数据点
     START_INDEX = 0  # 数据起点
     DATA_SIZE = 11520
     WINDOW_SIZE = 48
@@ -404,7 +404,7 @@ if __name__ == "__main__":
     )
     
     # 保存多步数据集
-    dump(multi_step_datasets, "multi_step_datasets.pkl")
+    dump(multi_step_datasets, "../../../multi_step_datasets.pkl")
     print("\n[+] 已保存: multi_step_datasets.pkl")
     
     # 保留原有的单步数据（兼容性）
@@ -413,12 +413,12 @@ if __name__ == "__main__":
     )
 
     # Step 7: 保存数据
-    dump(train_set, "train_set")
-    dump(train_label_clean, "train_label")  # 模型训练的目标
+    dump(train_set, "../../../train_set")
+    dump(train_label_clean, "../../../train_label")  # 模型训练的目标
 
-    dump(test_set, "test_set")
-    dump(test_label_clean, "test_label_clean")  # 用于评估模型对趋势的捕捉
-    dump(test_label_raw, "test_label_raw")  # 用于评估模型在真实环境中的最终误差！
+    dump(test_set, "../../../test_set")
+    dump(test_label_clean, "../../../test_label_clean")  # 用于评估模型对趋势的捕捉
+    dump(test_label_raw, "../../../test_label_raw")  # 用于评估模型在真实环境中的最终误差！
 
     print("\n🎉 数据处理与保存完成！")
     print("模型输入 X 形状:", train_set.shape)

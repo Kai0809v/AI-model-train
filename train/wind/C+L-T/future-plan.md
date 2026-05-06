@@ -1,5 +1,3 @@
-非常好的实际应用场景！让我为您规划一个面向API部署的优化路线。
-
 ## 📋 多步长预测系统优化路线图
 
 ### 阶段一：基础架构重构（1-2周）⭐ 优先级最高
@@ -136,69 +134,7 @@ for epoch in range(epochs):
 
 ---
 
-### 阶段三：API接口设计（3-5天）
 
-#### 3.1 FastAPI接口规范
-```python
-from fastapi import FastAPI
-from pydantic import BaseModel
-import torch
-
-app = FastAPI(title="风电功率预测API")
-
-class PredictionRequest(BaseModel):
-    historical_data: list  # 过去48步的特征数据
-    horizon: int = 1       # 预测步长: 1/4/8/16
-    confidence_interval: bool = False  # 是否返回置信区间
-
-class PredictionResponse(BaseModel):
-    predictions: list      # 预测值列表
-    timestamps: list       # 对应的时间戳
-    rmse_estimate: float   # 预估误差
-    model_version: str
-
-@app.post("/predict")
-async def predict_power(request: PredictionRequest):
-    # 1. 数据预处理（标准化、特征工程）
-    processed_data = preprocess(request.historical_data)
-    
-    # 2. 模型推理
-    with torch.no_grad():
-        predictions = model(
-            processed_data, 
-            horizon=request.horizon
-        )
-    
-    # 3. 反归一化
-    predictions_real = scaler_y.inverse_transform(predictions)
-    
-    # 4. 后处理（物理约束）
-    predictions_real = np.clip(predictions_real, 0, max_capacity)
-    
-    return PredictionResponse(
-        predictions=predictions_real.tolist(),
-        timestamps=generate_timestamps(request.horizon),
-        rmse_estimate=get_rmse_by_horizon(request.horizon),
-        model_version="v2.0"
-    )
-```
-
-
-#### 3.2 性能监控与日志
-```python
-# 记录每次预测的实际误差（用于持续优化）
-def log_prediction(actual, predicted, horizon):
-    metrics = {
-        'timestamp': datetime.now(),
-        'horizon': horizon,
-        'rmse': np.sqrt(mean_squared_error(actual, predicted)),
-        'mae': mean_absolute_error(actual, predicted)
-    }
-    # 写入数据库或日志文件
-```
-
-
----
 
 ### 阶段四：高级优化（可选，2-3周）
 
@@ -221,23 +157,9 @@ class BayesianTransformer(nn.Module):
 ```
 
 
-#### 4.2 在线学习机制
-```python
-# 定期用新数据微调模型
-def online_fine_tune(new_data, learning_rate=1e-5):
-    """
-    每周用最新数据微调模型，适应数据分布漂移
-    """
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    
-    for epoch in range(5):  # 少量epoch避免过拟合
-        loss = compute_loss(new_data)
-        loss.backward()
-        optimizer.step()
-```
 
 
-#### 4.3 模型集成
+#### 4.3 模型集成（已完成）
 ```python
 # 集成3个不同随机种子的模型
 class EnsemblePredictor:
@@ -264,15 +186,6 @@ class EnsemblePredictor:
 - [ ] 对比各步长指标（1/4/8/16步）
 - [ ] 消融实验验证改进效果
 
-### 第3周：API开发
-- [ ] 搭建FastAPI服务
-- [ ] 实现数据预处理管道
-- [ ] 添加监控和日志
-
-### 第4周：部署与测试
-- [ ] Docker容器化
-- [ ] 压力测试（并发请求）
-- [ ] A/B测试对比旧方案
 
 ---
 
@@ -291,12 +204,3 @@ class EnsemblePredictor:
 
 ---
 
-## ❓ 下一步行动
-
-我建议按以下顺序执行：
-
-1. **首先确认需求**：您希望优先实现哪个步长（1/4/8/16）？还是全部同时实现？
-2. **数据准备**：我先修改 `part1.py` 生成多步标签数据，您看可以吗？
-3. **模型改造**：然后实现多步输出架构
-
-**您希望我现在开始修改数据处理脚本，先生成多步标签数据吗？** 还是您有其他优先级考虑？

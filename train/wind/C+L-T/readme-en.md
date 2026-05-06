@@ -98,7 +98,7 @@ from api_v6 import ForecastService
 import pandas as pd
 
 # Initialize prediction service
-service = ForecastService(base_models_dir="assets")
+service = ForecastService(base_models_dir="../../../assets")
 
 # Load data
 df = pd.read_csv("your_data.csv")
