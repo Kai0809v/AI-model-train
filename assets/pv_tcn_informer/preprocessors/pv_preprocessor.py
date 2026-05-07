@@ -99,11 +99,31 @@ class PV_Preprocessor:
         
         # 1. 列名映射
         # 匹配原始列名(注意可能有额外空格)
+        import re
         rename_map = {}
         for raw_col in df_out.columns:
             raw_col_stripped = raw_col.strip()
+            
+            # 🔧 精确匹配
             if raw_col_stripped in self.COL_MAPPING:
                 rename_map[raw_col] = self.COL_MAPPING[raw_col_stripped]
+                continue
+            
+            # 🔧 模糊匹配：将多个连续空格替换为单个空格后再匹配
+            normalized_col = re.sub(r'\s+', ' ', raw_col_stripped)
+            if normalized_col in self.COL_MAPPING:
+                rename_map[raw_col] = self.COL_MAPPING[normalized_col]
+                continue
+            
+            # 🔧 更宽松的匹配：忽略所有空格后匹配核心关键词
+            # 例如: "Air temperature  (°C)" -> "Airtemperature(°C)"
+            no_space_col = re.sub(r'\s+', '', raw_col_stripped)
+            for mapping_key, short_name in self.COL_MAPPING.items():
+                no_space_key = re.sub(r'\s+', '', mapping_key)
+                if no_space_col == no_space_key:
+                    rename_map[raw_col] = short_name
+                    break
+        
         if rename_map:
             df_out.rename(columns=rename_map, inplace=True)
         
@@ -241,12 +261,45 @@ class PV_Preprocessor:
         if self._is_raw_data(future_df):
             future_df = self._normalize_dataframe(future_df)
         
+        # 🔧 0.5. 自动调整行数到24行（避免序列长度不匹配）
+        if len(future_df) != 24:
+            print(f"⚠️  警告: future_df有{len(future_df)}行，自动调整为24行")
+            if len(future_df) > 24:
+                # 如果超过24行，取最后24行（最新的预测）
+                future_df = future_df.iloc[-24:].copy()
+                print(f"   → 截取最后24行")
+            else:
+                # 如果不足24行，用最后一行重复填充
+                last_row = future_df.iloc[-1:].copy()
+                repeat_count = 24 - len(future_df)
+                future_df = pd.concat([future_df] + [last_row] * repeat_count, ignore_index=True)
+                print(f"   → 用最后一行重复填充{repeat_count}次")
+        
         # 1. 验证列名
         if not all(col in future_df.columns for col in self.all_feature_cols):
             missing = [col for col in self.all_feature_cols if col not in future_df.columns]
             raise ValueError(f"future_df缺少列: {missing}")
         
-        # 2. 提取32个特征并标准化
+        # 🔧 2. NaN值修复（关键：必须在标准化前处理）
+        critical_cols = [col for col in self.all_feature_cols if col in future_df.columns]
+        
+        # 第一步：前向填充 + 后向填充
+        future_df[critical_cols] = future_df[critical_cols].ffill().bfill()
+        
+        # 第二步：对仍有NaN的列用均值填充（避免inplace=True的Copy-on-Write问题）
+        for col in critical_cols:
+            if future_df[col].isnull().any():
+                col_mean = future_df[col].mean()
+                # 如果均值也是NaN（整列都是NaN），用0填充
+                if pd.isna(col_mean):
+                    col_mean = 0.0
+                future_df[col] = future_df[col].fillna(col_mean)
+        
+        # 🔧 第三步：最终验证，确保没有NaN
+        if future_df[critical_cols].isnull().any().any():
+            raise ValueError(f"NaN值修复失败，仍包含NaN的列: {[col for col in critical_cols if future_df[col].isnull().any()]}")
+        
+        # 3. 提取32个特征并标准化
         future_features_full = future_df[self.all_feature_cols].values  # [24, 32]
         future_features_scaled = self.scaler_x.transform(future_features_full)  # [24, 32]
         
@@ -272,6 +325,25 @@ class PV_Preprocessor:
         # 0. 如果是原始数据，先进行列名映射和特征工程
         if self._is_raw_data(df_recent):
             df_recent = self._normalize_dataframe(df_recent)
+        
+        # 🔧 NaN值修复（确保计算平均值时没有NaN）
+        critical_cols = [col for col in self.all_feature_cols if col in df_recent.columns]
+        
+        # 第一步：前向填充 + 后向填充
+        df_recent[critical_cols] = df_recent[critical_cols].ffill().bfill()
+        
+        # 第二步：对仍有NaN的列用均值填充（避免inplace=True的Copy-on-Write问题）
+        for col in critical_cols:
+            if df_recent[col].isnull().any():
+                col_mean = df_recent[col].mean()
+                # 如果均值也是NaN（整列都是NaN），用0填充
+                if pd.isna(col_mean):
+                    col_mean = 0.0
+                df_recent[col] = df_recent[col].fillna(col_mean)
+        
+        # 🔧 第三步：最终验证，确保没有NaN
+        if df_recent[critical_cols].isnull().any().any():
+            raise ValueError(f"NaN值修复失败，仍包含NaN的列: {[col for col in critical_cols if df_recent[col].isnull().any()]}")
         
         # 取最后4步的平均值作为未来24步的近似
         last_n_steps = 4

@@ -3,8 +3,6 @@
 负责加载True_TCN_Informer模型并执行推理
 """
 import torch
-import torch.nn as nn
-import numpy as np
 import os
 import sys
 
@@ -22,13 +20,15 @@ class PV_ModelWrapper:
     负责加载模型和执行推理
     """
     
-    def __init__(self, asset_dir, input_dim=11):
+    def __init__(self, asset_dir, input_dim=11, model_filename="best_tcn_informer.pth"):
         """
         :param asset_dir: 资产目录路径
         :param input_dim: PCA降维后的特征维度(默认11)
+        :param model_filename: 模型文件名(默认best_tcn_informer.pth)
         """
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.input_dim = input_dim
+        self.model_filename = model_filename
         
         # 固定参数(与训练时保持一致)
         self.seq_len = 192
@@ -40,7 +40,7 @@ class PV_ModelWrapper:
     
     def _load_model(self, asset_dir):
         """加载训练好的模型权重"""
-        model_path = os.path.join(asset_dir, "best_tcn_informer.pth")
+        model_path = os.path.join(asset_dir, self.model_filename)
         
         self.model = True_TCN_Informer(
             tcn_input_dim=self.input_dim,
