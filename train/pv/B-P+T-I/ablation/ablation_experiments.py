@@ -6,15 +6,13 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import os
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-import joblib
 import sys
 
-sys.path.append('..')
+sys.path.append('../../../..')
 
 from data_loader import create_dataloaders
 from model_architecture import (
-    True_TCN_Informer, BaselineFCModel, 
-    InformerOnlyModel, TCN_LinearModel
+    True_TCN_Informer, InformerOnlyModel, TCN_LinearModel
 )
 from PV_part1_for_ab import run_feature_optimization_pipeline, run_feature_optimization_pipeline_base, run_without_bp_pipeline
 

@@ -3,8 +3,6 @@
 负责加载True_TCN_Informer模型并执行推理
 """
 import torch
-import torch.nn as nn
-import numpy as np
 import os
 import sys
 

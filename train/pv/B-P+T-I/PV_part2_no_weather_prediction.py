@@ -4,10 +4,17 @@ import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import os
+import sys
 
-# 导入前置模块
-from data_loader import create_dataloaders
-from model_architecture import TCN_Informer_Model, True_TCN_Informer
+# 🔧 修复Informer2020的导入路径问题（不修改其源代码）
+informer_path = os.path.join(os.path.dirname(__file__), '../../../Informer2020')
+if informer_path not in sys.path:
+    sys.path.insert(0, informer_path)
+
+# 导入前置模块（使用无未来数据版本的数据加载器）
+from data_loader_no_weather_prediction import create_dataloaders_no_weather
+from model_architecture import True_TCN_Informer
 
 
 # ==========================================
@@ -62,13 +69,27 @@ class EarlyStopping:
 # ==========================================
 # 3. 核心训练与测试循环
 # ==========================================
-def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' if torch.cuda.is_available() else 'cpu'):
-    print(f"--- 启动训练引擎 (使用设备: {device}) ---")
+def train_and_evaluate_no_weather(pkl_path, epochs=50, learning_rate=0.001, 
+                                   device='cuda' if torch.cuda.is_available() else 'cpu',
+                                   output_dir="assets/pv_tcn_informer_no_weather_prediction"):
+    """
+    无未来气象数据版本的训练流程
+    
+    核心差异：
+    - 使用 create_dataloaders_no_weather（解码器输入未来部分为零填充）
+    - 模型资产保存到独立目录
+    """
+    print(f"--- 启动训练引擎 (无未来数据版本, 使用设备: {device}) ---")
+    
+    # 创建输出目录
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"✅ 创建输出目录: {output_dir}")
 
-    # 1. 获取数据
+    # 1. 获取数据（使用无未来数据版本的数据加载器）
     # 扩大为观察过去 2 天 (192步) 或 3 天 (288步){parameter A}，预测未来 6 小时 (24步){parameter C}，并且保持B是A的一半
     seq_len, label_len, pred_len = 192, 96, 24
-    train_loader, val_loader, test_loader, bundle = create_dataloaders(
+    train_loader, val_loader, test_loader, bundle = create_dataloaders_no_weather(
         pkl_path, seq_len=seq_len, label_len=label_len, pred_len=pred_len, batch_size=32
     )
 
@@ -96,13 +117,6 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
     # 既然解决了过拟合问题,现在再使用 MSE
     criterion = nn.MSELoss()
     
-    # ❌ 动态加权 MSE 实验失败：归一化空间中权重差异过大（16-21 倍），导致梯度不平衡
-    # def weighted_mse_loss(preds, trues):
-    #     weights = 0.1 + torch.abs(trues)
-    #     squared_error = (preds.squeeze(-1) - trues) ** 2
-    #     weighted_error = squared_error * weights
-    #     return weighted_error.mean()
-
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-3)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=epochs, eta_min=1e-6
@@ -164,8 +178,9 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
         current_lr = optimizer.param_groups[0]['lr']
         print(f"           Learning Rate: {current_lr:.6f}")
 
-        # 触发早停机制
-        early_stopping(v_loss, model, path='best_tcn_informer.pth')
+        # 触发早停机制（保存到新目录）
+        model_save_path = os.path.join(output_dir, 'best_tcn_informer_no_weather_prediction.pth')
+        early_stopping(v_loss, model, path=model_save_path)
         if early_stopping.early_stop:
             print("🚀 触发早停机制，训练提前结束。")
             break
@@ -175,7 +190,7 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
     # ==========================================
     print("\n--- 开始测试集评估 ---")
     # 加载表现最好的模型权重
-    model.load_state_dict(torch.load('best_tcn_informer.pth'))
+    model.load_state_dict(torch.load(model_save_path))
     model.eval()
 
     preds_list = []
@@ -272,18 +287,26 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
     
     plt.figure(figsize=(12, 5))
     plt.plot(trues_inverse[best_sample_idx, :], label=f'Ground Truth (Sample {best_sample_idx})', color='blue', marker='o')
-    plt.plot(preds_inverse[best_sample_idx, :], label='TCN-Informer Prediction', color='red', linestyle='--', marker='x')
-    plt.title(f'PV Power Forecasting (Sample {best_sample_idx}, Total Power: {sample_power_sums[best_sample_idx]:.2f} MW)')
+    plt.plot(preds_inverse[best_sample_idx, :], label='TCN-Informer No Weather Prediction', color='red', linestyle='--', marker='x')
+    plt.title(f'PV Power Forecasting - No Weather Data (Sample {best_sample_idx}, Total Power: {sample_power_sums[best_sample_idx]:.2f} MW)')
     plt.xlabel('Future Time Steps (15 min/step)')
     plt.ylabel('Power (MW)')
     plt.legend()
     plt.grid(True)
-    plt.savefig('prediction_result.png')
-    print("\n🖼️ 预测对比曲线已保存为 prediction_result.png")
+    
+    plot_save_path = os.path.join(output_dir, 'prediction_result_no_weather.png')
+    plt.savefig(plot_save_path)
+    print(f"\n🖼️ 预测对比曲线已保存为 {plot_save_path}")
+
+    # 保存预处理器bundle（用于推理时加载）
+    preprocessor_bundle_path = os.path.join(output_dir, 'preprocessor_bundle.pkl')
+    import joblib
+    joblib.dump(bundle, preprocessor_bundle_path)
+    print(f"✅ 预处理器bundle已保存至: {preprocessor_bundle_path}")
 
     return metrics
 
 
 if __name__ == "__main__":
     # 执行流水线
-    train_and_evaluate("processed_data/model_ready_data.pkl")
+    train_and_evaluate_no_weather("../../../processed_data/model_ready_data.pkl")

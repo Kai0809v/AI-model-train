@@ -1,7 +1,9 @@
 """
 序列长度对比实验脚本
-自动测试不同的 seq_len 和 weight_decay 配置组合
-TODO：探索序列长度与正则化强度的交互效应
+自动测试不同的 seq_len 和 weight_decay 配置组合+
+TODO：
+- [ ] 根据新的PV_part2.py，重新设计序列长度实验方案
+- [ ] 探索序列长度与正则化强度的交互效应
 """
 
 import torch

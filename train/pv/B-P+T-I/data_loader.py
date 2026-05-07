@@ -114,7 +114,7 @@ def create_dataloaders(pkl_path, seq_len=96, label_len=48, pred_len=24, batch_si
 # ================= 测试运行 =================
 if __name__ == "__main__":
     # 替换为您上一步保存的 pkl 路径
-    PKL_FILE = "processed_data/model_ready_data.pkl"
+    PKL_FILE = "../../../processed_data/model_ready_data.pkl"
 
     if os.path.exists(PKL_FILE):
         train_dl, val_dl, test_dl, bundle_info = create_dataloaders(PKL_FILE)

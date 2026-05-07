@@ -6,7 +6,6 @@
 - 框架：PyTorch（支持 GPU 加速）
 """
 import os
-import sys
 import pickle
 import joblib
 import numpy as np
