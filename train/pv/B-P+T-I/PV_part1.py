@@ -268,5 +268,5 @@ def run_feature_optimization_pipeline(input_path, output_dir="processed_data"):
 
 
 if __name__ == "__main__":
-    PV_DATA = "./data/PV130MW.xlsx" # 每 15 分钟一个数据点
+    PV_DATA = r"D:\APredict\data\PV130MW.xlsx" # 每 15 分钟一个数据点
     run_feature_optimization_pipeline(PV_DATA)

@@ -165,7 +165,7 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
         print(f"           Learning Rate: {current_lr:.6f}")
 
         # 触发早停机制
-        early_stopping(v_loss, model, path='../../../best_tcn_informer.pth')
+        early_stopping(v_loss, model, path='./best_tcn_informer.pth')
         if early_stopping.early_stop:
             print("🚀 触发早停机制，训练提前结束。")
             break
@@ -175,7 +175,7 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
     # ==========================================
     print("\n--- 开始测试集评估 ---")
     # 加载表现最好的模型权重
-    model.load_state_dict(torch.load('../../../best_tcn_informer.pth'))
+    model.load_state_dict(torch.load('./best_tcn_informer.pth'))
     model.eval()
 
     preds_list = []
@@ -286,4 +286,4 @@ def train_and_evaluate(pkl_path, epochs=50, learning_rate=0.001, device='cuda' i
 
 if __name__ == "__main__":
     # 执行流水线
-    train_and_evaluate("../../../processed_data/model_ready_data.pkl")
+    train_and_evaluate("./processed_data/model_ready_data.pkl")
