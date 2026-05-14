@@ -27,7 +27,7 @@ class PositionalEncoding(nn.Module):
 
 
 class SimpleMultiStepTransformer(nn.Module):
-    """V4稳定架构(与训练代码part2_multi_horizon_v6_ensemble.py保持一致)"""
+    """与训练代码part2_multi_horizon_v7.py保持一致"""
     def __init__(self, input_dim, horizon=1):
         super().__init__()
         
@@ -36,7 +36,7 @@ class SimpleMultiStepTransformer(nn.Module):
         
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=256, nhead=8, dim_feedforward=512,
-            batch_first=True, dropout=0.1
+            batch_first=True, dropout=0.2
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=4)
         
@@ -49,10 +49,10 @@ class SimpleMultiStepTransformer(nn.Module):
         self.fc = nn.Sequential(
             nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.3),
             nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.3),
             nn.Linear(64, horizon)
         )
     
@@ -71,8 +71,8 @@ class SimpleMultiStepTransformer(nn.Module):
 
 class Wind_ModelWrapper:
     """
-    风电CEEMDAN-LGBM-Transformer模型包装器
-    负责加载集成学习模型并执行推理
+    风电CEEMDAN-LGBM-Transformer模型包装器（单模型版）
+    负责加载 h1/h4/h8 三个步长的独立模型并执行推理
     """
     
     def __init__(self, asset_dir):
@@ -86,45 +86,51 @@ class Wind_ModelWrapper:
         self._load_models(asset_dir)
     
     def _load_models(self, asset_dir):
-        """加载h1/h4/h8三个步长的集成模型"""
-        ensemble_h1_path = os.path.join(asset_dir, "ensemble_models_h1_v6.pth")
+        """
+        加载h1/h4/h8三个步长的单模型（适配 part2_multi_horizon_v7.py 格式）
+        是的，又双叒叕更新了
+        """
+        self.single_models = {}
         
-        if os.path.exists(ensemble_h1_path):
-            # V6集成学习模式
-            self.use_ensemble = True
-            self.ensemble_models = {}
-            
-            for h in [1, 4, 8]:
-                ensemble_path = os.path.join(asset_dir, f"ensemble_models_h{h}_v6.pth")
-                if os.path.exists(ensemble_path):
-                    ensemble_package = torch.load(ensemble_path, map_location=self.device, weights_only=False)
-                    models = []
+        for h in [1, 4, 8]:
+            model_path = os.path.join(asset_dir, f"transformer_model_h{h}.pth")
+            if os.path.exists(model_path):
+                try:
+                    # 修复 PyTorch 2.6+ 的 weights_only 限制
+                    model_package = torch.load(model_path, map_location=self.device, weights_only=False)
                     
-                    # 从第一个模型获取input_dim（通过embedding.weight的第二维）
-                    first_state_dict = ensemble_package['model_state_dicts'][0]
-                    input_dim = first_state_dict['embedding.weight'].shape[1]
+                    # 适配新保存的键名 'model_state_dict'
+                    state_dict = model_package.get('model_state_dict') or model_package.get('state_dict')
                     
-                    for state_dict in ensemble_package['model_state_dicts']:
-                        model = SimpleMultiStepTransformer(
-                            input_dim=input_dim,
-                            horizon=h
-                        ).to(self.device)
-                        model.load_state_dict(state_dict)
-                        model.eval()
-                        models.append(model)
+                    # 获取特征维度，优先从包中读取，否则从权重推断
+                    input_dim = model_package.get('feature_dim', None)
+                    if input_dim is None and state_dict:
+                        input_dim = state_dict['embedding.weight'].shape[1]
+                    else:
+                        input_dim = 37 # 默认 fallback
                     
-                    self.ensemble_models[h] = models
-                    print(f"[+] 已加载{h}步集成模型({len(models)}个子模型)")
-            
-            print("[✓] 使用V6集成学习模式")
+                    model = SimpleMultiStepTransformer(
+                        input_dim=input_dim,
+                        horizon=h
+                    ).to(self.device)
+                    
+                    model.load_state_dict(state_dict)
+                    model.eval()
+                    self.single_models[h] = model
+                    print(f"[+] 已加载{h}步单模型 (Feature Dim: {input_dim})")
+                except Exception as e:
+                    print(f"[!] 加载{h}步模型失败: {e}")
+            else:
+                print(f"[!] 未找到模型文件: {model_path}")
+        
+        if not self.single_models:
+            print("[!] 警告: 未加载到任何可用模型")
         else:
-            # 回退到传统单模型模式(如果需要可以扩展)
-            self.use_ensemble = False
-            print("[!] 警告:未找到集成模型文件,仅支持占位")
+            print("[✓] 单模型加载完成")
     
     def predict(self, tensor_x, steps=1, scaler_y=None):
         """
-        执行模型推理
+        执行单模型推理
         :param tensor_x: 输入张量 [1, 96, selected_dim]
         :param steps: 预测步长(1/4/8)
         :param scaler_y: y的标准化器(用于反归一化)
@@ -135,25 +141,14 @@ class Wind_ModelWrapper:
             if steps not in [1, 4, 8]:
                 return {"success": False, "error": f"不支持的预测步长:{steps}。仅支持[1, 4, 8]"}
             
-            if not self.use_ensemble:
-                return {"success": False, "error": "未加载集成模型"}
+            if not hasattr(self, 'single_models') or steps not in self.single_models:
+                return {"success": False, "error": f"未加载{steps}步模型或模型不可用"}
             
-            # 获取对应步长的模型集合
-            models = self.ensemble_models.get(steps)
-            if models is None:
-                return {"success": False, "error": f"未找到{steps}步模型"}
-            
-            # 集成学习推理:多个模型投票
+            model = self.single_models[steps]
             tensor_x = tensor_x.to(self.device)
-            all_preds = []
             
             with torch.no_grad():
-                for model in models:
-                    pred = model(tensor_x)  # [1, steps]
-                    all_preds.append(pred.cpu().numpy())
-            
-            # 取平均:[1, steps]
-            pred_scaled = np.mean(all_preds, axis=0)
+                pred_scaled = model(tensor_x).cpu().numpy()  # [1, steps]
             
             # 反归一化
             if scaler_y is not None:
