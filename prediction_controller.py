@@ -135,7 +135,8 @@ class PredictionController:
                 
                 # 如果需要未来气象数据，加载并传入
                 if mode == "with_future" and future_weather_path:
-                    future_df = self.data_loader.load_file(future_weather_path)
+                    # 🔧 使用专用的未来气象数据加载方法（自动处理Power列）
+                    future_df = self.data_loader.load_future_weather_data(future_weather_path)
                     kwargs["future_weather_df"] = future_df
             
             # 第5步：执行预测

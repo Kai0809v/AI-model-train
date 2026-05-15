@@ -1105,7 +1105,7 @@ class DataAnalysisWindow(QMainWindow):
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
 
-        # 左侧上方：功率曲线图
+        # 左侧上方：功率柱状统计图图
         self.chart_card = QFrame()
         self.chart_card.setObjectName("ChartCard")
         self.chart_card.setStyleSheet("""
@@ -1118,7 +1118,7 @@ class DataAnalysisWindow(QMainWindow):
         """)
         chart_layout = QVBoxLayout(self.chart_card)
 
-        self.chart_title_label = QLabel("功率曲线分析")
+        self.chart_title_label = QLabel("功率分析")
         self.chart_title_label.setObjectName("ChartTitle")
         self.chart_title_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #1b5e20; margin-bottom: 10px;")
 
@@ -1327,7 +1327,7 @@ class DataAnalysisWindow(QMainWindow):
 
         print(f"   📊 数据总量: {len(df)}, 有效数据: {len(df_clean)}, 缺失: {missing_count}")
 
-        # 4. 绘制功率曲线（新逻辑）
+        # 4. 绘制功率柱状统计图（新逻辑）
         self.plot_power_curve(df_clean, power_col, time_col)
 
         # 5. 分析日发电峰值
@@ -1337,7 +1337,7 @@ class DataAnalysisWindow(QMainWindow):
         self.diagnose_quality_simple(df, df_clean, power_col, missing_count)
 
     def plot_power_curve(self, df, power_col, time_col):
-        """绘制两张功率曲线图：近30天日曲线 + 近24小时小时曲线"""
+        """绘制两张功率柱状统计图图：近30天日曲线 + 近24小时小时曲线"""
         try:
             # 🔧 根据粒度获取重采样频率
             granularity_text = self.granularity_combo.currentText()
@@ -1359,7 +1359,7 @@ class DataAnalysisWindow(QMainWindow):
             self.chart_renderer._ensure_matplotlib()
             self.chart_renderer.figure.clear()
 
-            # 📊 图1：近30天的日功率曲线
+            # 📊 图1：近30天的日功率柱状统计图
             max_time = df_indexed.index.max()
             min_time_30d = max_time - pd.Timedelta(days=30)
             df_last_30_days = df_indexed[df_indexed.index >= min_time_30d]
@@ -1384,7 +1384,7 @@ class DataAnalysisWindow(QMainWindow):
 
                 self._render_power_chart_subplot(
                     df_daily_30, power_col,
-                    "近30天日功率曲线",
+                    "近30天日功率柱状统计图",
                     "日期",
                     x_ticks_daily, x_labels_daily,
                     chart_index=0  # 第一个图表
@@ -1394,7 +1394,7 @@ class DataAnalysisWindow(QMainWindow):
             else:
                 print("⚠️ 近30天无数据，跳过日曲线绘制")
 
-            #  图2：近24小时的小时功率曲线
+            #  图2：近24小时的小时功率柱状统计图
             min_time_24h = max_time - pd.Timedelta(hours=24)
             df_last_24h = df_indexed[df_indexed.index >= min_time_24h]
 
@@ -1422,7 +1422,7 @@ class DataAnalysisWindow(QMainWindow):
 
                     self._render_power_chart_subplot(
                         df_hourly, power_col,
-                        "近24小时功率曲线",
+                        "近24小时功率柱状统计图",
                         "时间",
                         x_ticks_hourly, x_labels_hourly,
                         chart_index=1  # 第二个图表
@@ -1454,7 +1454,7 @@ class DataAnalysisWindow(QMainWindow):
                 print("✅ 图表已嵌入界面")
 
         except Exception as e:
-            print(f"⚠️ 功率曲线绘制失败: {e}")
+            print(f"⚠️ 功率柱状统计图绘制失败: {e}")
             import traceback
             traceback.print_exc()
 

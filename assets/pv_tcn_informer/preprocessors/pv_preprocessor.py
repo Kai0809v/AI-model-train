@@ -84,6 +84,20 @@ class PV_Preprocessor:
         df_cols = set(df.columns.astype(str))
         return len(raw_cols & df_cols) >= 3  # 至少有3个原始列名
     
+    def _is_future_weather_data(self, df: pd.DataFrame) -> bool:
+        """
+        判断DataFrame是否为未来气象数据（不包含Power列）
+        
+        未来气象数据的特征：
+        - 包含气象列（TSI, DNI, GHI, Temp等）
+        - 不包含Power列
+        - 行数较少（通常24行）
+        """
+        has_weather_cols = any(col in df.columns for col in ['TSI', 'DNI', 'GHI', 'Temp', 'Atmosphere', 'Humidity'])
+        has_power_col = 'Power' in df.columns or 'Power (MW)' in df.columns
+        
+        return has_weather_cols and not has_power_col
+    
     def _normalize_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         将原始数据转换为包含32个特征列的标准格式
@@ -91,11 +105,16 @@ class PV_Preprocessor:
         2. 时间列解析
         3. 构建交互特征 (6个)
         4. 构建温度修正特征 (2个)
-        5. 构建滞后特征 (6个)
-        6. 构建滚动统计特征 (12个)
+        5. 构建滞后特征 (6个) - 仅当有Power列时
+        6. 构建滚动统计特征 (12个) - 仅当有Power列时
         7. 填充NaN值
+        
+        🔧 关键改进：支持未来气象数据（无Power列），自动跳过Power相关特征
         """
         df_out = df.copy()
+        
+        # 检测是否为未来气象数据（无Power列）
+        is_future_weather = self._is_future_weather_data(df_out)
         
         # 1. 列名映射
         # 匹配原始列名(注意可能有额外空格)
@@ -159,29 +178,54 @@ class PV_Preprocessor:
         if 'GHI_Corrected' not in df_out.columns:
             df_out['GHI_Corrected'] = df_out['GHI'] * (1 - 0.004 * (df_out['Temp'] - 25))
         
-        # 5. 滞后特征 (与PV_part1.py一致)
-        for lag in [4, 12, 24]:
-            col_name = f'Power_lag_{lag}'
-            if col_name not in df_out.columns:
-                df_out[col_name] = df_out['Power'].shift(lag)
-        for lag in [4]:
-            for feat in ['TSI', 'DNI', 'GHI']:
-                col_name = f'{feat}_lag_{lag}'
+        # 5. 滞后特征 (与PV_part1.py一致) - 仅当有Power列时
+        has_power = 'Power' in df_out.columns
+        if has_power:
+            for lag in [4, 12, 24]:
+                col_name = f'Power_lag_{lag}'
                 if col_name not in df_out.columns:
-                    df_out[col_name] = df_out[feat].shift(lag)
+                    df_out[col_name] = df_out['Power'].shift(lag)
+            for lag in [4]:
+                for feat in ['TSI', 'DNI', 'GHI']:
+                    col_name = f'{feat}_lag_{lag}'
+                    if col_name not in df_out.columns:
+                        df_out[col_name] = df_out[feat].shift(lag)
+        else:
+            # 未来气象数据：用0填充Power相关滞后特征（静默处理，不输出警告）
+            for lag in [4, 12, 24]:
+                col_name = f'Power_lag_{lag}'
+                if col_name not in df_out.columns:
+                    df_out[col_name] = 0.0
+            for lag in [4]:
+                for feat in ['TSI', 'DNI', 'GHI']:
+                    col_name = f'{feat}_lag_{lag}'
+                    if col_name not in df_out.columns:
+                        df_out[col_name] = df_out[feat].shift(lag)
         
-        # 6. 滚动统计特征 (与PV_part1.py一致)
-        for window in [12, 48, 96]:
-            col_name = f'Power_rolling_mean_{window}'
-            if col_name not in df_out.columns:
-                df_out[col_name] = df_out['Power'].rolling(window=window).mean()
-            col_name = f'Power_rolling_std_{window}'
-            if col_name not in df_out.columns:
-                df_out[col_name] = df_out['Power'].rolling(window=window).std()
-            for feat in ['TSI', 'GHI']:
-                col_name = f'{feat}_rolling_mean_{window}'
+        # 6. 滚动统计特征 (与PV_part1.py一致) - 仅当有Power列时
+        if has_power:
+            for window in [12, 48, 96]:
+                col_name = f'Power_rolling_mean_{window}'
                 if col_name not in df_out.columns:
-                    df_out[col_name] = df_out[feat].rolling(window=window).mean()
+                    df_out[col_name] = df_out['Power'].rolling(window=window).mean()
+                col_name = f'Power_rolling_std_{window}'
+                if col_name not in df_out.columns:
+                    df_out[col_name] = df_out['Power'].rolling(window=window).std()
+                for feat in ['TSI', 'GHI']:
+                    col_name = f'{feat}_rolling_mean_{window}'
+                    if col_name not in df_out.columns:
+                        df_out[col_name] = df_out[feat].rolling(window=window).mean()
+        else:
+            # 未来气象数据：用0填充Power相关滚动特征（静默处理，不输出警告）
+            for window in [12, 48, 96]:
+                for stat in ['mean', 'std']:
+                    col_name = f'Power_rolling_{stat}_{window}'
+                    if col_name not in df_out.columns:
+                        df_out[col_name] = 0.0
+                for feat in ['TSI', 'GHI']:
+                    col_name = f'{feat}_rolling_mean_{window}'
+                    if col_name not in df_out.columns:
+                        df_out[col_name] = df_out[feat].rolling(window=window).mean()
         
         # 7. 填充NaN值 (滞后和滚动特征会在开头产生NaN)
         df_out.ffill(inplace=True)

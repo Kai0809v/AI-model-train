@@ -201,3 +201,61 @@ class DataLoader:
             '.XLS': 'Excel'
         }
         return format_map.get(ext, ext)
+    
+    def load_future_weather_data(self, file_path: str) -> pd.DataFrame:
+        """
+        加载未来气象数据文件（光伏预测专用）
+        
+        🔧 关键改进：
+        - 自动移除不需要的Power列
+        - 提升鲁棒性，避免因为包含功率列而报错
+        
+        Args:
+            file_path: 未来气象数据文件路径
+            
+        Returns:
+            DataFrame对象（已移除Power列）
+            
+        Raises:
+            FileNotFoundError: 文件不存在
+            ValueError: 不支持的文件格式或缺少必要的气象特征列
+        """
+        # 1. 加载文件
+        df = self.load_file(file_path)
+        
+        # 2. 自动移除Power列（如果存在）
+        power_columns_to_remove = []
+        for col in ['Power (MW)', 'Power']:
+            if col in df.columns:
+                power_columns_to_remove.append(col)
+        
+        if power_columns_to_remove:
+            # 静默移除，不输出警告信息（这是预期行为）
+            df = df.drop(columns=power_columns_to_remove)
+        
+        # 3. 验证是否包含必要的气象特征列（至少需要部分核心列）
+        required_weather_cols = ['TSI', 'DNI', 'GHI', 'Temp', 'Atmosphere', 'Humidity']
+        # 也检查原始列名格式
+        raw_weather_cols = [
+            'Total solar irradiance (W/m2)',
+            'Direct normal irradiance (W/m2)', 
+            'Global horicontal irradiance (W/m2)',
+            'Air temperature  (°C)',
+            'Atmosphere (hpa)',
+            'Relative humidity (%)'
+        ]
+        
+        # 检查是否有任意一种格式的列
+        has_short_names = any(col in df.columns for col in required_weather_cols)
+        has_raw_names = any(col in df.columns for col in raw_weather_cols)
+        
+        if not has_short_names and not has_raw_names:
+            raise ValueError(
+                f"未来气象数据缺少必要的气象特征列！\n"
+                f"可用列: {list(df.columns)}\n"
+                f"需要包含以下任一格式的列:\n"
+                f"  - 短名格式: TSI, DNI, GHI, Temp, Atmosphere, Humidity\n"
+                f"  - 原始格式: Total solar irradiance, Direct normal irradiance, etc."
+            )
+        
+        return df

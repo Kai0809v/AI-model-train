@@ -3,15 +3,120 @@
 负责加载True_TCN_Informer模型并执行推理
 """
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import os
 import sys
 
 # 添加Informer2020路径
-informer_path = os.path.join(os.path.dirname(__file__), '../../../../Informer2020')
+informer_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../Informer2020'))
 if informer_path not in sys.path:
     sys.path.insert(0, informer_path)
 
-from model_architecture import True_TCN_Informer
+from Informer2020.models.model import Informer
+
+
+# ==========================================
+# TCN 核心组件
+# ==========================================
+class Chomp1d(nn.Module):
+    """用于裁剪卷积后的多余填充，保证严格的因果性"""
+
+    def __init__(self, chomp_size):
+        super(Chomp1d, self).__init__()
+        self.chomp_size = chomp_size
+
+    def forward(self, x):
+        return x[:, :, :-self.chomp_size].contiguous()
+
+
+class TemporalBlock(nn.Module):
+    """TCN 的基本残差块"""
+
+    def __init__(self, n_inputs, n_outputs, kernel_size, stride, dilation, padding, dropout=0.2):
+        super(TemporalBlock, self).__init__()
+        self.conv1 = nn.Conv1d(n_inputs, n_outputs, kernel_size, stride=stride, padding=padding, dilation=dilation)
+        self.chomp1 = Chomp1d(padding)
+        self.relu1 = nn.ReLU()
+        self.dropout1 = nn.Dropout(dropout)
+
+        self.conv2 = nn.Conv1d(n_outputs, n_outputs, kernel_size, stride=stride, padding=padding, dilation=dilation)
+        self.chomp2 = Chomp1d(padding)
+        self.relu2 = nn.ReLU()
+        self.dropout2 = nn.Dropout(dropout)
+
+        self.net = nn.Sequential(self.conv1, self.chomp1, self.relu1, self.dropout1,
+                                 self.conv2, self.chomp2, self.relu2, self.dropout2)
+
+        self.downsample = nn.Conv1d(n_inputs, n_outputs, 1) if n_inputs != n_outputs else None
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        out = self.net(x)
+        res = x if self.downsample is None else self.downsample(x)
+        return self.relu(out + res)
+
+
+class TemporalConvNet(nn.Module):
+    """TCN 主网络"""
+
+    def __init__(self, num_inputs, num_channels, kernel_size=3, dropout=0.2):
+        super(TemporalConvNet, self).__init__()
+        layers = []
+        num_levels = len(num_channels)
+        for i in range(num_levels):
+            dilation_size = 2 ** i
+            in_channels = num_inputs if i == 0 else num_channels[i - 1]
+            out_channels = num_channels[i]
+            padding = (kernel_size - 1) * dilation_size
+            layers += [
+                TemporalBlock(in_channels, out_channels, kernel_size, stride=1, dilation=dilation_size, padding=padding,
+                              dropout=dropout)]
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = x.transpose(1, 2)
+        y = self.network(x)
+        return y.transpose(1, 2)
+
+
+# ==========================================
+# TCN-Informer 模型
+# ==========================================
+class True_TCN_Informer(nn.Module):
+    def __init__(self, tcn_input_dim, tcn_channels, seq_len, label_len, pred_len,
+                 d_model=512, n_heads=8, e_layers=3, d_layers=1, dropout=0.05):
+        super(True_TCN_Informer, self).__init__()
+
+        self.tcn = TemporalConvNet(num_inputs=tcn_input_dim, num_channels=tcn_channels)
+        tcn_out_dim = tcn_channels[-1]
+
+        self.informer = Informer(
+            enc_in=tcn_out_dim,
+            dec_in=tcn_out_dim,
+            c_out=1,
+            seq_len=seq_len,
+            label_len=label_len,
+            out_len=pred_len,
+            factor=5,
+            d_model=d_model,
+            n_heads=n_heads,
+            e_layers=e_layers,
+            d_layers=d_layers,
+            d_ff=d_model * 4,
+            dropout=dropout,
+            attn='prob',
+            embed='timeF',
+            freq='t',
+            activation='gelu',
+            output_attention=False
+        )
+
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
+        tcn_encoded_x = self.tcn(x_enc)
+        tcn_decoded_x = self.tcn(x_dec)
+        dec_out = self.informer(tcn_encoded_x, x_mark_enc, tcn_decoded_x, x_mark_dec)
+        return dec_out
 
 
 class PV_ModelWrapper:
